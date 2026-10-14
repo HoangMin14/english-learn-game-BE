@@ -1,0 +1,36 @@
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### Eclipse / STS ###
+.classpath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### VS Code ###
+.vscode/
+
+### Build ###
+build/
+
+### Logs ###
+*.log
+
+### Environment ###
+.env
+
+### Secret ###
+application-secret.properties
+
+### Spring Config ###
+src/main/resources/application.properties
