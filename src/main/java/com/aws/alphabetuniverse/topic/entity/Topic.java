@@ -30,4 +30,7 @@ public class Topic {
 
     @Column(name = "is_active")
     private Boolean active;
+
+    @Column(name = "image_key")
+    private String imageKey;
 }

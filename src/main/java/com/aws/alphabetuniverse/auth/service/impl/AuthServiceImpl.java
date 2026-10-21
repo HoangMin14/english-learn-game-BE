@@ -8,8 +8,11 @@ import com.aws.alphabetuniverse.user.dto.UserResponse;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.*;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,34 +36,83 @@ public class AuthServiceImpl implements AuthService {
     @Value("${app.frontend-url}")
     private String frontendUrl;
 
-    @Override
-    public UserResponse syncUser(Jwt jwt){
 
+    @Override
+    @Transactional
+    public UserResponse syncUser(Jwt jwt) {
+
+        if (jwt == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Authentication required"
+            );
+        }
+
+        // 1. Lấy danh tính từ Access Token đã được Spring Security xác thực
         String cognitoSub = jwt.getSubject();
 
-        String email = jwt.getClaim("email");
+        // 2. Gọi Cognito lấy thông tin tài khoản
+        GetUserResponse cognitoUser = cognitoClient.getUser(
+                GetUserRequest.builder()
+                        .accessToken(jwt.getTokenValue())
+                        .build()
+        );
 
-        String name = jwt.getClaim("name");
+        // 3. Lấy email và tên từ thuộc tính Cognito
+        String email = cognitoUser.userAttributes().stream()
+                .filter(attr -> "email".equals(attr.name()))
+                .map(AttributeType::value)
+                .findFirst()
+                .orElse(null);
 
+        String displayName = cognitoUser.userAttributes().stream()
+                .filter(attr -> "name".equals(attr.name()))
+                .map(AttributeType::value)
+                .findFirst()
+                .orElse(null);
 
-        User user = userRepository
-                .findByCognitoSub(cognitoSub)
-                .orElseGet(() -> {
+        if (email == null || email.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Email not found in Cognito"
+            );
+        }
 
-                    User newUser = User.builder()
-                            .cognitoSub(cognitoSub)
-                            .email(email)
-                            .displayName(name)
-                            .role("learner")
-                            .status("ACTIVE")
-                            .createdAt(LocalDateTime.now())
-                            .updatedAt(LocalDateTime.now())
-                            .build();
+        LocalDateTime now = LocalDateTime.now();
 
-                    return userRepository.save(newUser);
-                });
+        // 4. Tìm người dùng hiện có; nếu chưa có thì tạo mới
+        User user = userRepository.findByCognitoSub(cognitoSub)
+                .orElseGet(() -> User.builder()
+                        .cognitoSub(cognitoSub)
+                        .email(email)
+                        .displayName(displayName)
+                        .role("learner")
+                        .status("ACTIVE")
+                        .createdAt(now)
+                        .updatedAt(now)
+                        .build());
 
+        // 5. Đồng bộ lại thông tin từ Cognito
+        user.setEmail(email);
 
+        if (displayName != null && !displayName.isBlank()) {
+            user.setDisplayName(displayName);
+        }
+
+        if (user.getRole() == null || user.getRole().isBlank()) {
+            user.setRole("learner");
+        }
+
+        if (user.getStatus() == null || user.getStatus().isBlank()) {
+            user.setStatus("ACTIVE");
+        }
+
+        user.setUpdatedAt(now);
+
+        // 6. Lưu vào PostgreSQL
+        user = userRepository.save(user);
+
+        // 7. Trả response
         return UserResponse.builder()
                 .id(user.getId())
                 .email(user.getEmail())
@@ -69,6 +121,7 @@ public class AuthServiceImpl implements AuthService {
                 .status(user.getStatus())
                 .build();
     }
+
 
 
     @Override

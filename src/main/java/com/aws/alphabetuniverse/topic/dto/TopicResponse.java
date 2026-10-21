@@ -19,5 +19,7 @@ public class TopicResponse {
 
     private Integer orderNo;
 
+    private String imageUrl;
+
     private Boolean isActive;
 }
