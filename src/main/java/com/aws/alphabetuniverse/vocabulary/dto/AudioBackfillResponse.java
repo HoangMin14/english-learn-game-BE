@@ -1,4 +1,13 @@
+
 package com.aws.alphabetuniverse.vocabulary.dto;
 
-public record AudioBackfillResponse() {
+import java.util.List;
+
+public record AudioBackfillResponse(
+        Long topicId,
+        int totalMissing,
+        int generated,
+        int failed,
+        List<Long> failedVocabularyIds
+) {
 }
