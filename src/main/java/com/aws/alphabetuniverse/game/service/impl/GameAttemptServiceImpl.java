@@ -9,6 +9,8 @@ import com.aws.alphabetuniverse.game.repository.GameConfigRepository;
 import com.aws.alphabetuniverse.game.repository.GameSessionRepository;
 import com.aws.alphabetuniverse.game.repository.SessionAttemptRepository;
 import com.aws.alphabetuniverse.game.service.GameAttemptService;
+import com.aws.alphabetuniverse.game.service.GameSessionProgressResolverService;
+import com.aws.alphabetuniverse.game.service.GameUserAuthorizationService;
 import com.aws.alphabetuniverse.streak.service.StreakService;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
@@ -42,6 +44,8 @@ public class GameAttemptServiceImpl implements GameAttemptService {
     private final VocabularyRepository vocabularyRepository;
     private final GameConfigRepository gameConfigRepository;
     private final StreakService streakService;
+    private final GameUserAuthorizationService gameUserAuthorizationService;
+    private final GameSessionProgressResolverService progressResolver;
 
     @Override
     @Transactional
@@ -76,11 +80,17 @@ public class GameAttemptServiceImpl implements GameAttemptService {
             );
         }
 
-        User user = userRepository.findByCognitoSub(jwt.getSubject())
+        User authenticatedUser =
+                gameUserAuthorizationService.findAuthenticatedUser(jwt);
+
+        User user = userRepository
+                .findByIdForUpdate(authenticatedUser.getId())
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.UNAUTHORIZED,
-                        "Authenticated user not found"
+                        "User not found"
                 ));
+
+        gameUserAuthorizationService.assertActiveGameUser(user);
 
         // 2. Khóa phiên để tránh xử lý đồng thời.
         GameSession session = gameSessionRepository
@@ -106,123 +116,36 @@ public class GameAttemptServiceImpl implements GameAttemptService {
             );
         }
 
-        String mode = session.getMode() == null
-                ? ""
-                : session.getMode().toUpperCase(Locale.ROOT);
 
-        if (!Set.of(CHECKPOINT, FREE_PLAY, REVIEW).contains(mode)) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Game session has an invalid mode"
-            );
-        }
-
-
-        // 3. Đọc danh sách ID theo đúng thứ tự đã lưu khi tạo phiên.
-        List<Long> savedQuestionIds = session.getQuestionVocabIds();
-
-        if (savedQuestionIds == null
-                || savedQuestionIds.isEmpty()
-                || savedQuestionIds.stream().anyMatch(Objects::isNull)
-                || new HashSet<>(savedQuestionIds).size()
-                != savedQuestionIds.size()) {
-
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Invalid saved question order. Create a new session."
-            );
-        }
-
-        List<Long> questionIds = new ArrayList<>(savedQuestionIds);
-
-
-        if (questionIds.isEmpty()
-                || new HashSet<>(questionIds).size() != questionIds.size()) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Invalid saved question order. Create a new session."
-            );
-        }
-
-        if (CHECKPOINT.equals(mode)
-                && questionIds.size() > WORDS_PER_CHECKPOINT) {
-
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "A checkpoint cannot contain more than 5 questions"
-            );
-        }
-
-        // Lấy snapshot được lưu tại thời điểm tạo phiên.
-        List<GameQuestionSnapshot> questionSnapshots =
-                session.getQuestionSnapshot();
-
-        if (questionSnapshots == null || questionSnapshots.isEmpty()) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Game session has no question snapshot. "
-                            + "Please create a new session."
-            );
-        }
-
-        Map<Long, GameQuestionSnapshot> snapshotById = new HashMap<>();
-        List<Long> snapshotIds = new ArrayList<>();
-
-        for (GameQuestionSnapshot snapshot : questionSnapshots) {
-            if (snapshot == null
-                    || snapshot.vocabularyId() == null
-                    || snapshot.word() == null
-                    || snapshot.word().isBlank()
-                    || snapshot.scrambledLetters() == null
-                    || snapshot.scrambledLetters().isEmpty()
-                    || snapshot.topicPosition() == null) {
-
-                throw new ResponseStatusException(
-                        HttpStatus.CONFLICT,
-                        "Game session contains an invalid question snapshot"
-                );
-            }
-
-            if (snapshotById.putIfAbsent(
-                    snapshot.vocabularyId(), snapshot) != null) {
-
-                throw new ResponseStatusException(
-                        HttpStatus.CONFLICT,
-                        "Duplicate vocabulary in question snapshot"
-                );
-            }
-
-            snapshotIds.add(snapshot.vocabularyId());
-        }
-
-        // ID và thứ tự snapshot phải khớp danh sách câu hỏi của phiên.
-        if (!snapshotIds.equals(questionIds)) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Question snapshot does not match saved question order"
-            );
-        }
-
-        Integer savedMaxAttempts = session.getMaxAttemptsPerWord();
-
-        if (savedMaxAttempts == null || savedMaxAttempts < 1) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Game session has no valid attempt configuration. "
-                            + "Please create a new session."
-            );
-        }
-
-        int maxAttempts = savedMaxAttempts;
-
-        List<SessionAttempt> attempts =
+        // 3. Đọc attempts của session theo ID tăng dần.
+        List<SessionAttempt> loadedAttempts =
                 sessionAttemptRepository
                         .findBySession_IdOrderByIdAsc(sessionId);
 
-        // 4. Chỉ nhận đáp án của câu hiện tại.
-        Long currentVocabularyId = findNextUnresolved(
-                questionIds, attempts, maxAttempts, mode
-        );
+        // 4. Dùng helper chung để kiểm tra snapshot
+        // và khôi phục tiến độ hiện tại.
+        GameSessionProgressResolverService.Progress progress =
+                progressResolver.validateAndResolve(
+                        session,
+                        loadedAttempts
+                );
+
+        String mode = progress.mode();
+
+        // Giữ nguyên thứ tự câu hỏi đã lưu khi tạo session.
+        List<Long> questionIds = progress.questionIds();
+
+        Map<Long, GameQuestionSnapshot> snapshotById =
+                progress.snapshotById();
+
+        int maxAttempts = progress.maxAttemptsPerWord();
+
+        // Danh sách mutable do Progress quản lý.
+        // Phải thêm attempt mới vào danh sách này sau khi save.
+        List<SessionAttempt> attempts = progress.attempts();
+
+        // Xác định câu chưa xử lý xong đầu tiên.
+        Long currentVocabularyId = progress.findNextUnresolved();
 
         if (currentVocabularyId == null) {
             throw new ResponseStatusException(
@@ -237,6 +160,7 @@ public class GameAttemptServiceImpl implements GameAttemptService {
                     "Answer the current question first"
             );
         }
+
 
         Vocabulary vocabulary = vocabularyRepository
                 .findById(currentVocabularyId)
@@ -255,10 +179,8 @@ public class GameAttemptServiceImpl implements GameAttemptService {
             );
         }
 
-        List<SessionAttempt> previousAttempts =
-                attemptsFor(attempts, currentVocabularyId);
-
-        int attemptNumber = previousAttempts.size() + 1;
+        int attemptNumber =
+                progress.attemptsUsed(currentVocabularyId) + 1;
 
         if (attemptNumber > maxAttempts) {
             throw new ResponseStatusException(
@@ -338,15 +260,13 @@ public class GameAttemptServiceImpl implements GameAttemptService {
 
             if (wordCompleted) {
                 boolean allResolved = questionIds.stream()
-                        .allMatch(id -> isResolved(
-                                id, attempts, maxAttempts, mode
-                        ));
+                        .allMatch(progress::isResolved);
 
                 if (allResolved) {
                     sessionCompleted = true;
 
                     boolean allCorrect = questionIds.stream()
-                            .allMatch(id -> hasCorrectAttempt(id, attempts));
+                            .allMatch(progress::hasCorrectAttempt);
 
 
                     if (CHECKPOINT.equals(mode)) {
@@ -423,9 +343,7 @@ public class GameAttemptServiceImpl implements GameAttemptService {
         Long nextVocabularyId = null;
 
         if (wordCompleted && !sessionCompleted) {
-            nextVocabularyId = findNextUnresolved(
-                    questionIds, attempts, maxAttempts, mode
-            );
+            nextVocabularyId = progress.findNextUnresolved();
         }
 
         return new SubmitAttemptResponse(
@@ -443,58 +361,6 @@ public class GameAttemptServiceImpl implements GameAttemptService {
                 correctWord,
                 currentStreak
         );
-    }
-
-
-    private List<SessionAttempt> attemptsFor(
-            List<SessionAttempt> attempts,
-            Long vocabularyId
-    ) {
-        return attempts.stream()
-                .filter(attempt ->
-                        attempt.getVocabulary().getId().equals(vocabularyId))
-                .toList();
-    }
-
-    private boolean hasCorrectAttempt(
-            Long vocabularyId,
-            List<SessionAttempt> attempts
-    ) {
-        return attemptsFor(attempts, vocabularyId)
-                .stream()
-                .anyMatch(attempt ->
-                        Boolean.TRUE.equals(attempt.getIsCorrect()));
-    }
-
-    private boolean isResolved(
-            Long vocabularyId,
-            List<SessionAttempt> attempts,
-            int maxAttempts,
-            String mode
-    ) {
-        if (hasCorrectAttempt(vocabularyId, attempts)) {
-            return true;
-        }
-
-        if (!CHECKPOINT.equals(mode)) {
-            return attemptsFor(attempts, vocabularyId).size() >= maxAttempts;
-        }
-
-        return false;
-    }
-
-    private Long findNextUnresolved(
-            List<Long> questionIds,
-            List<SessionAttempt> attempts,
-            int maxAttempts,
-            String mode
-    ) {
-        return questionIds.stream()
-                .filter(id -> !isResolved(
-                        id, attempts, maxAttempts, mode
-                ))
-                .findFirst()
-                .orElse(null);
     }
 
 

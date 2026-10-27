@@ -3,6 +3,7 @@ package com.aws.alphabetuniverse.game.controller;
 
 import com.aws.alphabetuniverse.game.dto.CreateGameSessionRequest;
 import com.aws.alphabetuniverse.game.dto.GameSessionResponse;
+import com.aws.alphabetuniverse.game.dto.GameSessionResumeResponse;
 import com.aws.alphabetuniverse.game.service.GameSessionService;
 
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -17,6 +18,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/topics")
@@ -55,4 +58,22 @@ public class GameSessionController {
 
         return ResponseEntity.noContent().build();
     }
+
+
+    @GetMapping("/{topicId}/game-sessions/active")
+    @SecurityRequirement(name = "Bearer Authentication")
+    public ResponseEntity<GameSessionResumeResponse> getActiveSession(
+            @PathVariable Long topicId,
+            @AuthenticationPrincipal Jwt jwt
+    ) {
+        Optional<GameSessionResumeResponse> result =
+                gameSessionService.getActiveSession(topicId, jwt);
+
+        if (result.isEmpty()) {
+            return ResponseEntity.noContent().build();
+        }
+
+        return ResponseEntity.ok(result.get());
+    }
+
 }

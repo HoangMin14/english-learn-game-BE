@@ -14,4 +14,6 @@ public interface UserStreakRepository
     @Override
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<UserStreak> findById(Long id);
+
+    Optional<UserStreak> findByUser_Id(Long userId);
 }

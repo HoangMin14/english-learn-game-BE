@@ -1,13 +1,15 @@
 
 package com.aws.alphabetuniverse.game.service.impl;
 
-import com.aws.alphabetuniverse.game.dto.CreateGameSessionRequest;
-import com.aws.alphabetuniverse.game.dto.GameQuestionResponse;
-import com.aws.alphabetuniverse.game.dto.GameSessionResponse;
+import com.aws.alphabetuniverse.game.dto.*;
 import com.aws.alphabetuniverse.game.entity.GameSession;
+import com.aws.alphabetuniverse.game.entity.SessionAttempt;
 import com.aws.alphabetuniverse.game.enums.GameMode;
 import com.aws.alphabetuniverse.game.repository.GameSessionRepository;
+import com.aws.alphabetuniverse.game.repository.SessionAttemptRepository;
+import com.aws.alphabetuniverse.game.service.GameSessionProgressResolverService;
 import com.aws.alphabetuniverse.game.service.GameSessionService;
+import com.aws.alphabetuniverse.game.service.GameUserAuthorizationService;
 import com.aws.alphabetuniverse.learning.entity.UserTopicLearningProgress;
 import com.aws.alphabetuniverse.learning.repository.UserTopicLearningProgressRepository;
 import com.aws.alphabetuniverse.topic.entity.Topic;
@@ -24,9 +26,12 @@ import com.aws.alphabetuniverse.game.service.CheckpointService;
 import lombok.RequiredArgsConstructor;
 
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -48,6 +53,9 @@ public class GameSessionServiceImpl implements GameSessionService {
     private final GameSessionRepository gameSessionRepository;
     private final GameConfigRepository gameConfigRepository;
     private final CheckpointService checkpointService;
+    private final SessionAttemptRepository sessionAttemptRepository;
+    private final GameUserAuthorizationService gameUserAuthorizationService;
+    private final GameSessionProgressResolverService progressResolver;
 
     @Override
     @Transactional
@@ -74,12 +82,8 @@ public class GameSessionServiceImpl implements GameSessionService {
         }
 
         // 2. Xác định user từ Cognito sub.
-        User authenticatedUser = userRepository
-                .findByCognitoSub(jwt.getSubject())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.UNAUTHORIZED,
-                        "User not found"
-                ));
+        User authenticatedUser =
+                gameUserAuthorizationService.findAuthenticatedUser(jwt);
 
         User user = userRepository
                 .findByIdForUpdate(authenticatedUser.getId())
@@ -87,6 +91,8 @@ public class GameSessionServiceImpl implements GameSessionService {
                         HttpStatus.UNAUTHORIZED,
                         "User not found"
                 ));
+
+        gameUserAuthorizationService.assertActiveGameUser(user);
 
         // 3. Kiểm tra Topic.
         Topic topic = topicRepository
@@ -389,23 +395,9 @@ public class GameSessionServiceImpl implements GameSessionService {
             );
         }
 
-        // 2. Kiểm tra JWT.
-        if (jwt == null
-                || jwt.getSubject() == null
-                || jwt.getSubject().isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.UNAUTHORIZED,
-                    "Authentication required"
-            );
-        }
-
-        // 3. Xác định người dùng từ Cognito.
-        User user = userRepository
-                .findByCognitoSub(jwt.getSubject())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.UNAUTHORIZED,
-                        "User not found"
-                ));
+        // 2. Xác thực JWT, tìm user local và kiểm tra quyền.
+        User user = gameUserAuthorizationService
+                .requireActiveGameUser(jwt);
 
         // 4. Tìm và khóa phiên IN_PROGRESS của chính người dùng
         // trong Topic này.
@@ -432,6 +424,271 @@ public class GameSessionServiceImpl implements GameSessionService {
         session.setLastEventAt(now);
 
         gameSessionRepository.save(session);
+    }
+
+    private static final List<String> GAME_HISTORY_STATUSES =
+            List.of("COMPLETED", "FAILED", "ABANDONED");
+
+    @Override
+    @Transactional(readOnly = true)
+    public GameHistoryPageResponse getMyGameHistory(
+            Jwt jwt,
+            int page,
+            int size
+    ) {
+        // 1. Kiểm tra JWT
+        if (jwt == null
+                || jwt.getSubject() == null
+                || jwt.getSubject().isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Invalid authentication token"
+            );
+        }
+
+        // 2. Tìm user local theo Cognito sub
+        User user = userRepository
+                .findByCognitoSub(jwt.getSubject())
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.UNAUTHORIZED,
+                        "User has not been synchronized"
+                ));
+
+        // 3. Chỉ tài khoản ACTIVE được xem lịch sử
+        if (!"ACTIVE".equalsIgnoreCase(
+                String.valueOf(user.getStatus()))) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "User is not active"
+            );
+        }
+
+        // Cho phép learner và admin xem lịch sử của chính mình
+        String role = String.valueOf(user.getRole());
+
+        if (!"learner".equalsIgnoreCase(role)
+                && !"admin".equalsIgnoreCase(role)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Only learners and admins can access game history"
+            );
+        }
+
+        // 4. Kiểm tra phân trang
+        if (page < 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "page must be greater than or equal to 0"
+            );
+        }
+
+        if (size < 1 || size > 100) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "size must be between 1 and 100"
+            );
+        }
+
+        // Tránh offset vượt giới hạn int của truy vấn JPA/Hibernate
+        long offset = (long) page * size;
+
+        if (offset > Integer.MAX_VALUE) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Requested page offset is too large"
+            );
+        }
+
+        // 5. Truy vấn lịch sử bằng ID từ user local
+        Page<com.aws.alphabetuniverse.game.repository.projection.GameHistoryRow> historyPage =
+                gameSessionRepository.findGameHistory(
+                        user.getId(),
+                        GAME_HISTORY_STATUSES,
+                        PageRequest.of(page, size)
+                );
+
+        // 6. Map projection thành DTO
+        List<GameHistoryItemResponse> content =
+                historyPage.getContent()
+                        .stream()
+                        .map(this::toGameHistoryItem)
+                        .toList();
+
+        // 7. Trả metadata phân trang từ Page
+        return new GameHistoryPageResponse(
+                content,
+                historyPage.getNumber(),
+                historyPage.getSize(),
+                historyPage.getTotalElements(),
+                historyPage.getTotalPages()
+        );
+    }
+
+
+    @Override
+    @Transactional(
+            readOnly = true,
+            isolation = Isolation.REPEATABLE_READ
+    )
+    public Optional<GameSessionResumeResponse> getActiveSession(
+            Long topicId,
+            Jwt jwt
+    ) {
+        // 1. Validate topic ID.
+        if (topicId == null || topicId <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid topic ID"
+            );
+        }
+
+        // 2. Xác thực JWT và kiểm tra quyền user local.
+        User user = gameUserAuthorizationService
+                .requireActiveGameUser(jwt);
+
+        // 3. Tìm topic kể cả topic đã xóa mềm,
+        // miễn bản ghi vẫn tồn tại và repository cho phép đọc.
+        Topic topic = topicRepository.findById(topicId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Topic not found"
+                ));
+
+        if (topic.getName() == null || topic.getName().isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Topic name is missing"
+            );
+        }
+
+        // 4. Tìm phiên active của đúng user + topic.
+        // Không lọc theo mode và không khóa ghi.
+        Optional<GameSession> sessionOptional =
+                gameSessionRepository
+                        .findByUser_IdAndTopic_IdAndStatus(
+                                user.getId(),
+                                topicId,
+                                IN_PROGRESS
+                        );
+
+        if (sessionOptional.isEmpty()) {
+            return Optional.empty();
+        }
+
+        GameSession session = sessionOptional.get();
+
+        // 5. Kiểm tra quan hệ sở hữu và topic.
+        if (session.getUser() == null
+                || !user.getId().equals(session.getUser().getId())
+                || session.getTopic() == null
+                || !topicId.equals(session.getTopic().getId())) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Session ownership or topic data is inconsistent"
+            );
+        }
+
+        // 6. Lấy attempts của đúng session theo ID tăng dần.
+        List<SessionAttempt> attempts =
+                sessionAttemptRepository
+                        .findBySession_IdOrderByIdAsc(session.getId());
+
+        // 7. Xác thực snapshot và tính tiến độ.
+        GameSessionProgressResolverService.Progress progress =
+                progressResolver.validateAndResolve(
+                        session,
+                        attempts
+                );
+
+        Long currentVocabularyId = progress.findNextUnresolved();
+
+        if (currentVocabularyId == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "No resumable question remains"
+            );
+        }
+
+        int currentAttemptsUsed =
+                progress.attemptsUsed(currentVocabularyId);
+
+        int remainingAttempts = Math.max(
+                0,
+                progress.maxAttemptsPerWord() - currentAttemptsUsed
+        );
+
+        // 8. Chỉ trả các trường an toàn, không trả snapshot nguyên bản.
+        List<GameResumeQuestionResponse> questions =
+                progress.questionIds().stream()
+                        .map(vocabularyId -> {
+                            GameQuestionSnapshot snapshot =
+                                    progress.snapshotById().get(vocabularyId);
+
+                            return new GameResumeQuestionResponse(
+                                    snapshot.vocabularyId(),
+                                    snapshot.meaningVi(),
+                                    snapshot.scrambledLetters(),
+                                    snapshot.topicPosition(),
+                                    progress.questionStatus(
+                                            vocabularyId,
+                                            currentVocabularyId
+                                    ),
+                                    progress.attemptsUsed(vocabularyId),
+                                    progress.hasCorrectAttempt(vocabularyId)
+                            );
+                        })
+                        .toList();
+
+        GameSessionResumeResponse response =
+                new GameSessionResumeResponse(
+                        session.getId(),
+                        topic.getId(),
+                        topic.getName(),
+                        progress.mode(),
+                        session.getStatus(),
+                        session.getBatchStartPosition(),
+                        session.getBatchEndPosition(),
+                        progress.questionIds().size(),
+                        session.getScore(),
+                        progress.resolvedQuestions(),
+                        currentVocabularyId,
+                        progress.maxAttemptsPerWord(),
+                        currentAttemptsUsed,
+                        remainingAttempts,
+                        session.getStartedAt(),
+                        questions
+                );
+
+        return Optional.of(response);
+    }
+
+
+    private GameHistoryItemResponse toGameHistoryItem(
+            com.aws.alphabetuniverse.game.repository.projection.GameHistoryRow row
+    ) {
+        String topicName = row.getTopicName();
+
+        if (topicName == null || topicName.isBlank()) {
+            topicName = "Chủ đề không còn tồn tại";
+        }
+
+        Integer score = row.getScore() == null
+                ? 0
+                : row.getScore();
+
+        boolean won = Boolean.TRUE.equals(row.getWon());
+
+        return new GameHistoryItemResponse(
+                row.getSessionId(),
+                row.getTopicId(),
+                topicName,
+                row.getMode(),
+                row.getStatus(),
+                score,
+                won,
+                row.getStartedAt(),
+                row.getEndedAt()
+        );
     }
 
     private UserTopicLearningProgress requireLearningProgress(
