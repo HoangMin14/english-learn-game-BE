@@ -1,6 +1,7 @@
 package com.aws.alphabetuniverse.game.repository;
 
 import com.aws.alphabetuniverse.game.entity.GameSession;
+import com.aws.alphabetuniverse.game.repository.projection.GameStatisticsSessionAggregate;
 import com.aws.alphabetuniverse.leaderboard.repository.projection.WeeklyLeaderboardRow;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
@@ -140,6 +141,46 @@ public interface GameSessionRepository extends JpaRepository<GameSession,Long> {
     Optional<GameSession> findByUser_IdAndTopic_IdAndStatus(
             Long userId,
             Long topicId,
+            String status
+    );
+
+    @Query("""
+    SELECT
+        COUNT(s) AS totalSessions,
+
+        SUM(
+            CASE
+                WHEN s.status = 'COMPLETED'
+                     AND s.won = true
+                THEN 1
+                ELSE 0
+            END
+        ) AS wonSessions,
+
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN s.mode = 'CHECKPOINT'
+                         AND s.status = 'COMPLETED'
+                         AND s.won = true
+                    THEN COALESCE(s.score, 0)
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS totalCheckpointScore
+
+    FROM GameSession s
+    WHERE s.user.id = :userId
+    """)
+    GameStatisticsSessionAggregate getStatisticsByUserId(
+            @Param("userId") Long userId
+    );
+
+    List<GameSession> findAllByUser_IdAndTopic_IdAndModeAndStatusAndWonTrue(
+            Long userId,
+            Long topicId,
+            String mode,
             String status
     );
 }

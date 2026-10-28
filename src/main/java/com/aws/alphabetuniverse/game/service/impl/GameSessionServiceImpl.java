@@ -45,6 +45,7 @@ public class GameSessionServiceImpl implements GameSessionService {
 
     private static final int WORDS_PER_GAME = 5;
     private static final String IN_PROGRESS = "IN_PROGRESS";
+    private static final String CHECKPOINT = "CHECKPOINT";
 
     private final UserRepository userRepository;
     private final TopicRepository topicRepository;
@@ -662,6 +663,199 @@ public class GameSessionServiceImpl implements GameSessionService {
         return Optional.of(response);
     }
 
+    @Override
+    @Transactional(
+            readOnly = true,
+            isolation = Isolation.REPEATABLE_READ
+    )
+    public GameProgressResponse getMyProgress(Jwt jwt) {
+
+        // 1. Xác thực tài khoản hiện tại.
+        User user = gameUserAuthorizationService
+                .requireActiveGameUser(jwt);
+
+        // 2. Lấy topic theo đúng thứ tự hiển thị.
+        List<Topic> topics =
+                topicRepository.findByActiveTrueOrderByOrderNoAscIdAsc();
+
+        List<TopicProgressItemResponse> topicResponses =
+                new ArrayList<>(topics.size());
+
+        // 3. Tổng hợp tiến độ từng topic.
+        for (Topic topic : topics) {
+
+            Long topicId = topic.getId();
+
+            // Lấy phiên đang hoạt động, không lọc theo mode.
+            Optional<GameSession> activeSession =
+                    gameSessionRepository
+                            .findByUser_IdAndTopic_IdAndStatus(
+                                    user.getId(),
+                                    topicId,
+                                    IN_PROGRESS
+                            );
+
+            Long activeSessionId = activeSession
+                    .map(GameSession::getId)
+                    .orElse(null);
+
+            String activeSessionMode = activeSession
+                    .map(GameSession::getMode)
+                    .orElse(null);
+
+            // Lấy từ vựng đang hoạt động theo thứ tự hiện tại.
+            List<Vocabulary> activeVocabularies =
+                    vocabularyRepository
+                            .findByTopic_IdAndActiveTrueOrderByOrderNoAscIdAsc(
+                                    topicId
+                            );
+
+            // Topic không có từ vựng vẫn trả thông tin phiên active.
+            if (activeVocabularies.isEmpty()) {
+
+                topicResponses.add(
+                        new TopicProgressItemResponse(
+                                topicId,
+                                topic.getName(),
+                                activeSessionId,
+                                activeSessionMode,
+                                0,
+                                0,
+                                null,
+                                false,
+                                List.of()
+                        )
+                );
+
+                continue;
+            }
+
+            // 4. Đọc tiến độ học, tuyệt đối không ghi DB.
+            int furthestPosition =
+                    progressRepository
+                            .findByUser_IdAndTopic_Id(
+                                    user.getId(),
+                                    topicId
+                            )
+                            .map(progress ->
+                                    getFurthestPositionForRead(
+                                            progress,
+                                            topicId,
+                                            activeVocabularies
+                                    )
+                            )
+                            .orElse(0);
+
+            Long furthestVocabularyId =
+                    furthestPosition > 0
+                            ? activeVocabularies
+                              .get(furthestPosition - 1)
+                              .getId()
+                            : null;
+
+            // 5. Lấy toàn bộ checkpoint đã thắng một lần.
+            Set<Set<Long>> wonCheckpointIds =
+                    checkpointService.getWonCheckpointVocabularyIdSets(
+                            user.getId(),
+                            topicId
+                    );
+
+            List<CheckpointProgressResponse> checkpoints =
+                    new ArrayList<>();
+
+            // 6. Tính trạng thái từng checkpoint trong bộ nhớ.
+            for (int startIndex = 0;
+                 startIndex < activeVocabularies.size();
+                 startIndex += WORDS_PER_GAME) {
+
+                int endIndexExclusive = Math.min(
+                        startIndex + WORDS_PER_GAME,
+                        activeVocabularies.size()
+                );
+
+                int checkpointNumber =
+                        startIndex / WORDS_PER_GAME + 1;
+
+                int startPosition = startIndex + 1;
+                int endPosition = endIndexExclusive;
+
+                Set<Long> currentVocabularyIds =
+                        activeVocabularies
+                                .subList(startIndex, endIndexExclusive)
+                                .stream()
+                                .map(Vocabulary::getId)
+                                .collect(Collectors.toSet());
+
+                // Đã thắng khi tập ID trùng chính xác.
+                boolean passed =
+                        wonCheckpointIds.contains(currentVocabularyIds);
+
+                // Chỉ nhận IN_PROGRESS nếu đúng cả vị trí
+                // lẫn bộ ID từ vựng của checkpoint hiện tại.
+                boolean inProgress = activeSession
+                        .map(session ->
+                                isMatchingActiveCheckpoint(
+                                        session,
+                                        startPosition,
+                                        endPosition,
+                                        currentVocabularyIds
+                                )
+                        )
+                        .orElse(false);
+
+                String status;
+
+                if (passed) {
+                    status = "PASSED";
+                } else if (inProgress) {
+                    status = "IN_PROGRESS";
+                } else if (endPosition <= furthestPosition) {
+                    status = "AVAILABLE";
+                } else {
+                    status = "LOCKED";
+                }
+
+                checkpoints.add(
+                        new CheckpointProgressResponse(
+                                checkpointNumber,
+                                startPosition,
+                                endPosition,
+                                status
+                        )
+                );
+            }
+
+            // 7. REVIEW chỉ mở khi đã học hết và thắng mọi checkpoint.
+            boolean allCheckpointsPassed =
+                    !checkpoints.isEmpty()
+                            && checkpoints.stream()
+                            .allMatch(checkpoint ->
+                                    "PASSED".equals(checkpoint.status())
+                            );
+
+            boolean reviewUnlocked =
+                    furthestPosition >= activeVocabularies.size()
+                            && allCheckpointsPassed;
+
+            // 8. Trả tiến độ của topic.
+            topicResponses.add(
+                    new TopicProgressItemResponse(
+                            topicId,
+                            topic.getName(),
+                            activeSessionId,
+                            activeSessionMode,
+                            activeVocabularies.size(),
+                            furthestPosition,
+                            furthestVocabularyId,
+                            reviewUnlocked,
+                            List.copyOf(checkpoints)
+                    )
+            );
+        }
+
+        return new GameProgressResponse(List.copyOf(topicResponses));
+    }
+
 
     private GameHistoryItemResponse toGameHistoryItem(
             com.aws.alphabetuniverse.game.repository.projection.GameHistoryRow row
@@ -896,4 +1090,100 @@ public class GameSessionServiceImpl implements GameSessionService {
                 : vocabularies.get(0);
     }
 
+    private boolean isMatchingActiveCheckpoint(
+            GameSession session,
+            int startPosition,
+            int endPosition,
+            Set<Long> expectedVocabularyIds
+    ) {
+        return IN_PROGRESS.equals(session.getStatus())
+                && CHECKPOINT.equals(session.getMode())
+                && Objects.equals(
+                session.getBatchStartPosition(),
+                startPosition
+        )
+                && Objects.equals(
+                session.getBatchEndPosition(),
+                endPosition
+        )
+                && sameVocabularyIds(
+                session.getQuestionVocabIds(),
+                expectedVocabularyIds
+        );
+    }
+
+    private boolean sameVocabularyIds(
+            List<Long> storedIds,
+            Set<Long> expectedIds
+    ) {
+        if (expectedIds == null
+                || expectedIds.isEmpty()
+                || !hasUniqueNonNullIds(storedIds)) {
+            return false;
+        }
+
+        return storedIds.size() == expectedIds.size()
+                && new HashSet<>(storedIds).equals(expectedIds);
+    }
+
+    private boolean hasUniqueNonNullIds(List<Long> ids) {
+        return ids != null
+                && !ids.isEmpty()
+                && ids.stream().noneMatch(Objects::isNull)
+                && new HashSet<>(ids).size() == ids.size();
+    }
+
+    private int getFurthestPositionForRead(
+            UserTopicLearningProgress progress,
+            Long topicId,
+            List<Vocabulary> activeVocabularies
+    ) {
+        Vocabulary furthestVocabulary = progress.getFurthestVocab();
+
+        if (furthestVocabulary == null
+                || furthestVocabulary.getTopic() == null
+                || !topicId.equals(
+                furthestVocabulary.getTopic().getId()
+        )) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Learning progress is invalid"
+            );
+        }
+
+        // Trường hợp từ vựng vẫn còn hoạt động.
+        for (int i = 0; i < activeVocabularies.size(); i++) {
+            if (activeVocabularies.get(i).getId()
+                    .equals(furthestVocabulary.getId())) {
+                return i + 1;
+            }
+        }
+
+        // Từ đã bị xóa mềm: tìm từ hoạt động gần nhất
+        // theo orderNo mà không lưu thay đổi.
+        Vocabulary replacement =
+                findNearestActiveVocabularyAtOrBeforeOrderNo(
+                        activeVocabularies,
+                        furthestVocabulary.getOrderNo()
+                );
+
+        if (replacement == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Unable to resolve learning progress"
+            );
+        }
+
+        for (int i = 0; i < activeVocabularies.size(); i++) {
+            if (activeVocabularies.get(i).getId()
+                    .equals(replacement.getId())) {
+                return i + 1;
+            }
+        }
+
+        throw new ResponseStatusException(
+                HttpStatus.CONFLICT,
+                "Unable to resolve active vocabulary position"
+        );
+    }
 }

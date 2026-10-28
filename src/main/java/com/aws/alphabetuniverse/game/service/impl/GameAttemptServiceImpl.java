@@ -11,6 +11,8 @@ import com.aws.alphabetuniverse.game.repository.SessionAttemptRepository;
 import com.aws.alphabetuniverse.game.service.GameAttemptService;
 import com.aws.alphabetuniverse.game.service.GameSessionProgressResolverService;
 import com.aws.alphabetuniverse.game.service.GameUserAuthorizationService;
+import com.aws.alphabetuniverse.leaderboard.service.WeeklyScoreService;
+import com.aws.alphabetuniverse.progress.service.UserProgressService;
 import com.aws.alphabetuniverse.streak.service.StreakService;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
@@ -26,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -46,6 +50,8 @@ public class GameAttemptServiceImpl implements GameAttemptService {
     private final StreakService streakService;
     private final GameUserAuthorizationService gameUserAuthorizationService;
     private final GameSessionProgressResolverService progressResolver;
+    private final UserProgressService userProgressService;
+    private final WeeklyScoreService weeklyScoreService;
 
     @Override
     @Transactional
@@ -227,6 +233,17 @@ public class GameAttemptServiceImpl implements GameAttemptService {
 
         Instant now = Instant.now();
 
+        if (correct) {
+            LocalDateTime completedAt =
+                    LocalDateTime.ofInstant(now, ZoneOffset.UTC);
+
+            userProgressService.recordCorrectAnswer(
+                    user.getId(),
+                    currentVocabularyId,
+                    completedAt
+            );
+        }
+
         // 7. CHECKPOINT: sai hết số lượt thử được cấu hình thì thất bại ngay.
         if (CHECKPOINT.equals(mode)
                 && !correct
@@ -326,6 +343,21 @@ public class GameAttemptServiceImpl implements GameAttemptService {
                 // Sai nhưng vẫn còn lượt thử.
                 gameSessionRepository.save(session);
             }
+        }
+
+        // 7.5. Đồng bộ tổng điểm tuần khi thắng CHECKPOINT.
+        if (sessionCompleted
+                && CHECKPOINT.equals(mode)
+                && Boolean.TRUE.equals(sessionWon)
+                && "COMPLETED".equals(session.getStatus())
+                && session.getScore() != null
+                && session.getScore() > 0
+                && session.getEndedAt() != null) {
+
+            weeklyScoreService.synchronizeWeek(
+                    user.getId(),
+                    session.getEndedAt()
+            );
         }
 
         // Chỉ tính streak khi thắng CHECKPOINT đủ 5/5 từ.

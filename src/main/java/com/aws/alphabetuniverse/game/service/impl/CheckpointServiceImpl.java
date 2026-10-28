@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 @Service
@@ -66,5 +67,40 @@ public class CheckpointServiceImpl implements CheckpointService {
                             && savedIds.size() == expectedIds.size()
                             && new HashSet<>(savedIds).equals(expectedIds);
                 });
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Set<Set<Long>> getWonCheckpointVocabularyIdSets(
+            Long userId,
+            Long topicId
+    ) {
+        List<GameSession> sessions =
+                gameSessionRepository
+                        .findAllByUser_IdAndTopic_IdAndModeAndStatusAndWonTrue(
+                                userId,
+                                topicId,
+                                "CHECKPOINT",
+                                "COMPLETED"
+                        );
+
+        Set<Set<Long>> result = new HashSet<>();
+
+        for (GameSession session : sessions) {
+            List<Long> questionIds = session.getQuestionVocabIds();
+
+            // Bỏ qua dữ liệu snapshot không hợp lệ.
+            if (questionIds == null
+                    || questionIds.isEmpty()
+                    || questionIds.stream().anyMatch(Objects::isNull)
+                    || new HashSet<>(questionIds).size() != questionIds.size()) {
+                continue;
+            }
+
+            // Lưu tập ID, không phụ thuộc thứ tự câu hỏi bị xáo trộn.
+            result.add(Set.copyOf(questionIds));
+        }
+
+        return result;
     }
 }
