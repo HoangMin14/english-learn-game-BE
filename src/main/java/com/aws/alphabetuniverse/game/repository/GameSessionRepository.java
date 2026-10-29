@@ -183,4 +183,9 @@ public interface GameSessionRepository extends JpaRepository<GameSession,Long> {
             String mode,
             String status
     );
+
+    Optional<GameSession> findByIdAndUser_Id(
+            Long id,
+            Long userId
+    );
 }

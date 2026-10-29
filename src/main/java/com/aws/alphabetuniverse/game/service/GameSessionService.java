@@ -11,4 +11,8 @@ public interface GameSessionService {
     public GameHistoryPageResponse getMyGameHistory(Jwt jwt, int page, int size);
     public Optional<GameSessionResumeResponse> getActiveSession(Long topicId, Jwt jwt);
     public GameProgressResponse getMyProgress(Jwt jwt);
+    public GameHistoryDetailResponse getMyGameHistoryDetail(
+            Long sessionId,
+            Jwt jwt
+    );
 }

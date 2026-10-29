@@ -18,6 +18,9 @@ public class GameConfig {
     @Column(name = "id", nullable = false)
     private Long id;
 
+    @Column(name = "topic_id")
+    private Long topicId;
+
     @NotNull
     @Size(max = 100)
     @Column(name = "config_key", nullable = false, length = 100)

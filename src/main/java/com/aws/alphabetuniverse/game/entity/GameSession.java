@@ -83,6 +83,14 @@ public class GameSession {
     @Column(name = "max_attempts_per_word")
     private Integer maxAttemptsPerWord;
 
+    @Column(name = "score_enabled_snapshot")
+    private Boolean scoreEnabledSnapshot;
+
+    @Column(name = "checkpoint_pass_points_snapshot")
+    private Integer checkpointPassPointsSnapshot;
+
+    @Column(name = "streak_enabled_snapshot")
+    private Boolean streakEnabledSnapshot;
 
     @ColumnDefault("now()")
     @Column(name = "started_at")

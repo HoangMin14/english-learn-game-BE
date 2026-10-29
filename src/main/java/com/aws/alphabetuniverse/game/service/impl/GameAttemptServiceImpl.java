@@ -46,7 +46,6 @@ public class GameAttemptServiceImpl implements GameAttemptService {
     private final SessionAttemptRepository sessionAttemptRepository;
     private final UserRepository userRepository;
     private final VocabularyRepository vocabularyRepository;
-    private final GameConfigRepository gameConfigRepository;
     private final StreakService streakService;
     private final GameUserAuthorizationService gameUserAuthorizationService;
     private final GameSessionProgressResolverService progressResolver;
@@ -122,6 +121,7 @@ public class GameAttemptServiceImpl implements GameAttemptService {
             );
         }
 
+        validateCheckpointSnapshots(session);
 
         // 3. Đọc attempts của session theo ID tăng dần.
         List<SessionAttempt> loadedAttempts =
@@ -291,20 +291,10 @@ public class GameAttemptServiceImpl implements GameAttemptService {
                         if (allCorrect) {
                             int reward = 0;
 
-                            // Chỉ kiểm tra cấu hình điểm, không phụ thuộc số câu.
-                            // Nhóm cuối có ít hơn 5 từ vẫn được thưởng nếu thắng.
-                            if (getRequiredBooleanConfig("score_enabled")) {
+                            if (Boolean.TRUE.equals(
+                                    session.getScoreEnabledSnapshot())) {
 
-                                reward = getRequiredIntConfig(
-                                        "checkpoint_pass_points"
-                                );
-
-                                if (reward < 0) {
-                                    throw new ResponseStatusException(
-                                            HttpStatus.INTERNAL_SERVER_ERROR,
-                                            "Invalid checkpoint_pass_points configuration"
-                                    );
-                                }
+                                reward = session.getCheckpointPassPointsSnapshot();
                             }
 
                             sessionWon = true;
@@ -365,7 +355,8 @@ public class GameAttemptServiceImpl implements GameAttemptService {
                 && Boolean.TRUE.equals(sessionWon)
                 && "CHECKPOINT".equals(mode)
                 && questionIds.size() == 5
-                && getRequiredBooleanConfig("streak_enabled")) {
+                && Boolean.TRUE.equals(
+                session.getStreakEnabledSnapshot())) {
 
             currentStreak =
                     streakService.recordActivity(user.getId());
@@ -395,49 +386,27 @@ public class GameAttemptServiceImpl implements GameAttemptService {
         );
     }
 
+    private void validateCheckpointSnapshots(GameSession session) {
 
-    private int getRequiredIntConfig(String key) {
-        String value = gameConfigRepository
-                .findByConfigKeyAndIsActiveTrue(key)
-                .map(config -> config.getConfigValue())
-                .filter(configValue -> !configValue.isBlank())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.INTERNAL_SERVER_ERROR,
-                        "Missing or empty active game configuration: " + key
-                ));
+        if (!CHECKPOINT.equalsIgnoreCase(
+                session.getMode() == null ? "" : session.getMode())) {
+            return;
+        }
 
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException ex) {
+        Integer points = session.getCheckpointPassPointsSnapshot();
+
+        if (session.getScoreEnabledSnapshot() == null
+                || points == null
+                || points < 0
+                || session.getStreakEnabledSnapshot() == null) {
+
             throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Invalid integer configuration: " + key
+                    HttpStatus.CONFLICT,
+                    "This CHECKPOINT session has missing or invalid " +
+                            "configuration snapshots. Abandon this session " +
+                            "and create a new one."
             );
         }
     }
-
-    private boolean getRequiredBooleanConfig(String key) {
-        String value = gameConfigRepository
-                .findByConfigKeyAndIsActiveTrue(key)
-                .map(config -> config.getConfigValue())
-                .filter(configValue -> !configValue.isBlank())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.INTERNAL_SERVER_ERROR,
-                        "Missing or empty active game configuration: " + key
-                ));
-
-        value = value.trim();
-
-        if (!"true".equalsIgnoreCase(value)
-                && !"false".equalsIgnoreCase(value)) {
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Invalid boolean configuration: " + key
-            );
-        }
-
-        return Boolean.parseBoolean(value);
-    }
-
 
 }

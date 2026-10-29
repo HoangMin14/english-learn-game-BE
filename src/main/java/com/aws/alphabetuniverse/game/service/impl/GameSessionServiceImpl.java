@@ -7,9 +7,7 @@ import com.aws.alphabetuniverse.game.entity.SessionAttempt;
 import com.aws.alphabetuniverse.game.enums.GameMode;
 import com.aws.alphabetuniverse.game.repository.GameSessionRepository;
 import com.aws.alphabetuniverse.game.repository.SessionAttemptRepository;
-import com.aws.alphabetuniverse.game.service.GameSessionProgressResolverService;
-import com.aws.alphabetuniverse.game.service.GameSessionService;
-import com.aws.alphabetuniverse.game.service.GameUserAuthorizationService;
+import com.aws.alphabetuniverse.game.service.*;
 import com.aws.alphabetuniverse.learning.entity.UserTopicLearningProgress;
 import com.aws.alphabetuniverse.learning.repository.UserTopicLearningProgressRepository;
 import com.aws.alphabetuniverse.topic.entity.Topic;
@@ -21,7 +19,6 @@ import com.aws.alphabetuniverse.vocabulary.repository.VocabularyRepository;
 import com.aws.alphabetuniverse.game.entity.GameQuestionSnapshot;
 import com.aws.alphabetuniverse.game.repository.GameConfigRepository;
 import org.hibernate.exception.ConstraintViolationException;
-import com.aws.alphabetuniverse.game.service.CheckpointService;
 
 import lombok.RequiredArgsConstructor;
 
@@ -52,14 +49,14 @@ public class GameSessionServiceImpl implements GameSessionService {
     private final VocabularyRepository vocabularyRepository;
     private final UserTopicLearningProgressRepository progressRepository;
     private final GameSessionRepository gameSessionRepository;
-    private final GameConfigRepository gameConfigRepository;
+    private final GameConfigService gameConfigService;
     private final CheckpointService checkpointService;
     private final SessionAttemptRepository sessionAttemptRepository;
     private final GameUserAuthorizationService gameUserAuthorizationService;
     private final GameSessionProgressResolverService progressResolver;
 
     @Override
-    @Transactional
+    @Transactional(isolation = Isolation.REPEATABLE_READ)
     public GameSessionResponse createSession(
             Long topicId,
             CreateGameSessionRequest request,
@@ -310,8 +307,11 @@ public class GameSessionServiceImpl implements GameSessionService {
                         .toList();
 
         // Chốt số lượt thử theo cấu hình Admin.
+        EffectiveGameConfig effectiveConfig =
+                gameConfigService.getEffectiveConfigs(topicId);
+
         int maxAttemptsPerWord =
-                getRequiredPositiveIntConfig("max_attempt_per_word");
+                effectiveConfig.maxAttemptsPerWord();
 
         Instant now = Instant.now();
 
@@ -338,6 +338,18 @@ public class GameSessionServiceImpl implements GameSessionService {
         // Hai trường mà GameAttemptServiceImpl cần.
         session.setQuestionSnapshot(questionSnapshots);
         session.setMaxAttemptsPerWord(maxAttemptsPerWord);
+
+        session.setScoreEnabledSnapshot(
+                effectiveConfig.scoreEnabled()
+        );
+
+        session.setCheckpointPassPointsSnapshot(
+                effectiveConfig.checkpointPassPoints()
+        );
+
+        session.setStreakEnabledSnapshot(
+                effectiveConfig.streakEnabled()
+        );
 
         GameSession savedSession;
 
@@ -857,6 +869,367 @@ public class GameSessionServiceImpl implements GameSessionService {
     }
 
 
+    @Override
+    @Transactional(
+            readOnly = true,
+            isolation = Isolation.REPEATABLE_READ
+    )
+    public GameHistoryDetailResponse getMyGameHistoryDetail(
+            Long sessionId,
+            Jwt jwt
+    ) {
+        // 1. Validate request.
+        if (sessionId == null || sessionId <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid game session ID"
+            );
+        }
+
+        if (jwt == null
+                || jwt.getSubject() == null
+                || jwt.getSubject().isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Invalid authentication token"
+            );
+        }
+
+        // 2. JWT Cognito sub -> user local.
+        User user = userRepository
+                .findByCognitoSub(jwt.getSubject())
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.UNAUTHORIZED,
+                        "User has not been synchronized"
+                ));
+
+        // 3. Validate account status and role.
+        if (!"ACTIVE".equalsIgnoreCase(
+                String.valueOf(user.getStatus()))) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "User is not active"
+            );
+        }
+
+        String role = String.valueOf(user.getRole());
+
+        if (!"learner".equalsIgnoreCase(role)
+                && !"admin".equalsIgnoreCase(role)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Only learners and admins can access game history"
+            );
+        }
+
+        // 4. Chỉ truy vấn phiên thuộc user hiện tại.
+        GameSession session = gameSessionRepository
+                .findByIdAndUser_Id(sessionId, user.getId())
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Game session not found"
+                ));
+
+        String status = String.valueOf(session.getStatus());
+
+        // 5. Không tiết lộ đáp án khi phiên vẫn đang chơi.
+        if ("IN_PROGRESS".equalsIgnoreCase(status)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Game session is still in progress. "
+                            + "Use the resume API instead."
+            );
+        }
+
+        Set<String> historyStatuses = Set.of(
+                "COMPLETED",
+                "FAILED",
+                "ABANDONED"
+        );
+
+        if (!historyStatuses.contains(
+                status.toUpperCase(Locale.ROOT))) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Game session is not a finished history session"
+            );
+        }
+
+        // 6. Đọc snapshot.
+        List<GameQuestionSnapshot> snapshots =
+                session.getQuestionSnapshot();
+
+        List<Long> savedQuestionIds =
+                session.getQuestionVocabIds();
+
+        Map<Long, GameQuestionSnapshot> snapshotById =
+                new LinkedHashMap<>();
+
+        List<Long> snapshotOrder = new ArrayList<>();
+
+        boolean snapshotStructureValid = true;
+
+        if (snapshots != null) {
+            for (GameQuestionSnapshot snapshot : snapshots) {
+                if (snapshot == null
+                        || snapshot.vocabularyId() == null
+                        || snapshot.vocabularyId() <= 0) {
+                    snapshotStructureValid = false;
+                    continue;
+                }
+
+                Long vocabularyId = snapshot.vocabularyId();
+
+                if (snapshotById.containsKey(vocabularyId)) {
+                    snapshotStructureValid = false;
+                    continue;
+                }
+
+                snapshotById.put(vocabularyId, snapshot);
+                snapshotOrder.add(vocabularyId);
+
+                if (!isCompleteHistorySnapshot(snapshot)) {
+                    snapshotStructureValid = false;
+                }
+            }
+        }
+
+        // 7. Đọc danh sách câu hỏi đã lưu.
+        List<Long> questionIds = new ArrayList<>();
+
+        boolean questionIdsStructureValid = true;
+
+        if (savedQuestionIds != null) {
+            for (Long vocabularyId : savedQuestionIds) {
+                if (vocabularyId == null || vocabularyId <= 0) {
+                    questionIdsStructureValid = false;
+                    continue;
+                }
+
+                if (questionIds.contains(vocabularyId)) {
+                    questionIdsStructureValid = false;
+                    continue;
+                }
+
+                questionIds.add(vocabularyId);
+            }
+        }
+
+        // Nếu thiếu danh sách ID, khôi phục thứ tự từ snapshot.
+        if (questionIds.isEmpty()) {
+            questionIds.addAll(snapshotOrder);
+        } else {
+            // Bảo toàn câu có trong snapshot nhưng bị thiếu
+            // khỏi question_vocab_ids.
+            for (Long vocabularyId : snapshotOrder) {
+                if (!questionIds.contains(vocabularyId)) {
+                    questionIds.add(vocabularyId);
+                    questionIdsStructureValid = false;
+                }
+            }
+        }
+
+        if (questionIds.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Cannot reconstruct history: question IDs "
+                            + "and snapshot are missing"
+            );
+        }
+
+        // 8. Đánh giá độ đầy đủ của dữ liệu lịch sử.
+        boolean historyComplete =
+                !snapshotById.isEmpty()
+                        && snapshotStructureValid
+                        && questionIdsStructureValid;
+
+        if (!snapshotOrder.equals(questionIds)) {
+            historyComplete = false;
+        }
+
+        for (Long vocabularyId : questionIds) {
+            if (!snapshotById.containsKey(vocabularyId)) {
+                historyComplete = false;
+            }
+        }
+
+        if (snapshotById.size() != questionIds.size()) {
+            historyComplete = false;
+        }
+
+        // 9. Fallback cho phiên cũ thiếu snapshot.
+        // Không lọc isActive: từ đã bị vô hiệu hóa vẫn có thể
+        // xuất hiện trong một phiên lịch sử.
+        Map<Long, Vocabulary> vocabularyById = new HashMap<>();
+
+        for (Vocabulary vocabulary :
+                vocabularyRepository.findAllById(questionIds)) {
+            vocabularyById.put(
+                    vocabulary.getId(),
+                    vocabulary
+            );
+        }
+
+        // 10. Lấy tất cả attempts một lần.
+        List<SessionAttempt> allAttempts =
+                sessionAttemptRepository
+                        .findBySession_IdOrderByIdAsc(sessionId);
+
+        Set<Long> questionIdSet = new HashSet<>(questionIds);
+
+        Map<Long, List<SessionAttempt>> attemptsByVocabularyId =
+                new HashMap<>();
+
+        for (SessionAttempt attempt : allAttempts) {
+            Long vocabularyId =
+                    attempt.getVocabulary() == null
+                            ? null
+                            : attempt.getVocabulary().getId();
+
+            if (vocabularyId == null
+                    || !questionIdSet.contains(vocabularyId)) {
+                historyComplete = false;
+                continue;
+            }
+
+            attemptsByVocabularyId
+                    .computeIfAbsent(
+                            vocabularyId,
+                            ignored -> new ArrayList<>()
+                    )
+                    .add(attempt);
+        }
+
+        // 11. Dựng response cho từng câu theo thứ tự đã lưu.
+        List<GameHistoryQuestionDetailResponse> questions =
+                new ArrayList<>();
+
+        Integer maxAttempts = session.getMaxAttemptsPerWord();
+
+        for (Long vocabularyId : questionIds) {
+            GameQuestionSnapshot snapshot =
+                    snapshotById.get(vocabularyId);
+
+            Vocabulary vocabulary =
+                    vocabularyById.get(vocabularyId);
+
+            boolean snapshotAvailable =
+                    isCompleteHistorySnapshot(snapshot);
+
+            if (!snapshotAvailable) {
+                historyComplete = false;
+            }
+
+            // Ưu tiên snapshot; chuỗi null/rỗng mới fallback.
+            String word = snapshot != null
+                    && snapshot.word() != null
+                    && !snapshot.word().isBlank()
+                    ? snapshot.word()
+                    : vocabulary != null
+                      ? vocabulary.getWord()
+                      : null;
+
+            String meaningVi = snapshot != null
+                    && snapshot.meaningVi() != null
+                    && !snapshot.meaningVi().isBlank()
+                    ? snapshot.meaningVi()
+                    : vocabulary != null
+                      ? vocabulary.getMeaningVi()
+                      : null;
+
+            List<String> scrambledLetters =
+                    snapshot != null
+                            && snapshot.scrambledLetters() != null
+                            ? snapshot.scrambledLetters().stream()
+                              .filter(Objects::nonNull)
+                              .filter(letter -> !letter.isBlank())
+                              .toList()
+                            : List.of();
+
+            // Không lấy topicPosition từ thứ tự từ vựng hiện tại.
+            Integer topicPosition = snapshot != null
+                    ? snapshot.topicPosition()
+                    : null;
+
+            List<SessionAttempt> wordAttempts =
+                    attemptsByVocabularyId.getOrDefault(
+                            vocabularyId,
+                            List.of()
+                    );
+
+            // 12. Đưa tất cả attempts vào response.
+            List<GameHistoryAttemptDetailResponse> attemptResponses =
+                    new ArrayList<>();
+
+            for (int i = 0; i < wordAttempts.size(); i++) {
+                SessionAttempt attempt = wordAttempts.get(i);
+
+                attemptResponses.add(
+                        new GameHistoryAttemptDetailResponse(
+                                attempt.getId(),
+                                i + 1,
+                                attempt.getSubmittedLetters(),
+                                Boolean.TRUE.equals(
+                                        attempt.getIsCorrect()
+                                ),
+                                attempt.getTimeMs(),
+                                attempt.getCreatedAt()
+                        )
+                );
+            }
+
+            // 13. Xác định kết quả từ, không dùng wordCompleted.
+            String result = resolveHistoryQuestionResult(
+                    wordAttempts,
+                    status,
+                    maxAttempts
+            );
+
+            questions.add(
+                    new GameHistoryQuestionDetailResponse(
+                            vocabularyId,
+                            word,
+                            meaningVi,
+                            scrambledLetters,
+                            topicPosition,
+                            snapshotAvailable,
+                            result,
+                            "CORRECT".equals(result),
+                            wordAttempts.size(),
+                            attemptResponses
+                    )
+            );
+        }
+
+        // 14. Trả nguyên điểm và kết quả đã lưu.
+        String topicName =
+                session.getTopic() == null
+                        || session.getTopic().getName() == null
+                        || session.getTopic().getName().isBlank()
+                        ? "Chủ đề không còn tồn tại"
+                        : session.getTopic().getName();
+
+        return new GameHistoryDetailResponse(
+                session.getId(),
+                session.getTopic() == null
+                        ? null
+                        : session.getTopic().getId(),
+                topicName,
+                String.valueOf(session.getMode()),
+                status,
+                session.getScore(),
+                Boolean.TRUE.equals(session.getWon()),
+                session.getStartedAt(),
+                session.getEndedAt(),
+                maxAttempts,
+                questions.size(),
+                historyComplete,
+                questions
+        );
+    }
+
+
+
     private GameHistoryItemResponse toGameHistoryItem(
             com.aws.alphabetuniverse.game.repository.projection.GameHistoryRow row
     ) {
@@ -1013,36 +1386,6 @@ public class GameSessionServiceImpl implements GameSessionService {
     }
 
 
-    private int getRequiredPositiveIntConfig(String key) {
-        String value = gameConfigRepository
-                .findByConfigKeyAndIsActiveTrue(key)
-                .map(config -> config.getConfigValue())
-                .filter(configValue ->
-                        configValue != null && !configValue.isBlank())
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.INTERNAL_SERVER_ERROR,
-                        "Missing or empty active game configuration: " + key
-                ));
-
-        try {
-            int result = Integer.parseInt(value.trim());
-
-            if (result < 1) {
-                throw new NumberFormatException(
-                        "Configuration must be positive"
-                );
-            }
-
-            return result;
-
-        } catch (NumberFormatException ex) {
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Invalid positive integer configuration: " + key
-            );
-        }
-    }
-
     private boolean isActiveSessionUniqueConflict(Throwable ex) {
         Throwable cause = ex;
 
@@ -1186,4 +1529,75 @@ public class GameSessionServiceImpl implements GameSessionService {
                 "Unable to resolve active vocabulary position"
         );
     }
+
+
+    private boolean isCompleteHistorySnapshot(
+            GameQuestionSnapshot snapshot
+    ) {
+        return snapshot != null
+                && snapshot.vocabularyId() != null
+                && snapshot.vocabularyId() > 0
+
+                && snapshot.word() != null
+                && !snapshot.word().isBlank()
+
+                && snapshot.meaningVi() != null
+                && !snapshot.meaningVi().isBlank()
+
+                && snapshot.scrambledLetters() != null
+                && !snapshot.scrambledLetters().isEmpty()
+                && snapshot.scrambledLetters().stream()
+                .allMatch(letter ->
+                        letter != null
+                                && !letter.isBlank()
+                )
+
+                && snapshot.topicPosition() != null
+                && snapshot.topicPosition() > 0;
+    }
+
+
+
+    private String resolveHistoryQuestionResult(
+            List<SessionAttempt> attempts,
+            String sessionStatus,
+            Integer maxAttempts
+    ) {
+        if (attempts == null || attempts.isEmpty()) {
+            return "UNANSWERED";
+        }
+
+        // Có ít nhất một lần trả lời đúng.
+        if (attempts.stream().anyMatch(
+                attempt -> Boolean.TRUE.equals(
+                        attempt.getIsCorrect()
+                )
+        )) {
+            return "CORRECT";
+        }
+
+        // Không đủ dữ liệu để xác định đã hết lượt.
+        if (maxAttempts == null || maxAttempts <= 0) {
+            return "UNKNOWN";
+        }
+
+        // Số lượt không nhất quán với cấu hình đã lưu.
+        if (attempts.size() > maxAttempts) {
+            return "UNKNOWN";
+        }
+
+        // Chỉ kết luận hết lượt khi đủ số lần thử đã lưu.
+        if (attempts.size() == maxAttempts) {
+            return "EXHAUSTED";
+        }
+
+        // Phiên bị bỏ dở khi từ vẫn còn lượt.
+        if ("ABANDONED".equalsIgnoreCase(sessionStatus)) {
+            return "INTERRUPTED";
+        }
+
+        // Không đủ bằng chứng để kết luận.
+        return "UNKNOWN";
+    }
+
 }

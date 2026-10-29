@@ -1,5 +1,6 @@
 package com.aws.alphabetuniverse.game.controller;
 
+import com.aws.alphabetuniverse.game.dto.GameHistoryDetailResponse;
 import com.aws.alphabetuniverse.game.dto.GameHistoryPageResponse;
 import com.aws.alphabetuniverse.game.service.GameSessionService;
 
@@ -12,10 +13,7 @@ import lombok.RequiredArgsConstructor;
 
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/users/me")
@@ -40,4 +38,17 @@ public class GameHistoryController {
                 size
         );
     }
+
+
+    @GetMapping("/game-history/{sessionId}")
+    public GameHistoryDetailResponse getMyGameHistoryDetail(
+            @PathVariable Long sessionId,
+            @AuthenticationPrincipal Jwt jwt
+    ) {
+        return gameSessionService.getMyGameHistoryDetail(
+                sessionId,
+                jwt
+        );
+    }
+
 }
