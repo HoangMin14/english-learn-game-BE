@@ -30,7 +30,7 @@ public class WeeklyScore {
 
     @ColumnDefault("0")
     @Column(name = "total_score")
-    private Integer totalScore;
+    private Long totalScore;
 
 
 }

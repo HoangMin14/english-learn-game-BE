@@ -10,6 +10,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public interface GameConfigRepository
         extends JpaRepository<GameConfig, Long> {
@@ -42,18 +43,23 @@ public interface GameConfigRepository
             clearAutomatically = true
     )
     @Query(value = """
-        INSERT INTO public.game_configs
-            (topic_id, config_key, config_value, is_active)
+        INSERT INTO public.game_configs AS current_config
+            (topic_id, config_key, config_value, description, is_active)
         VALUES
-            (NULL, :configKey, :configValue, TRUE)
-        ON CONFLICT (config_key) WHERE topic_id IS NULL
+            (NULL, :configKey, :configValue, :description, TRUE)
+
+        ON CONFLICT (config_key)
+        WHERE topic_id IS NULL
+
         DO UPDATE SET
             config_value = EXCLUDED.config_value,
+            description = EXCLUDED.description,
             is_active = TRUE
         """, nativeQuery = true)
     int upsertGlobalConfig(
             @Param("configKey") String configKey,
-            @Param("configValue") String configValue
+            @Param("configValue") String configValue,
+            @Param("description") String description
     );
 
     // Upsert cấu hình topic.
@@ -62,20 +68,33 @@ public interface GameConfigRepository
             clearAutomatically = true
     )
     @Query(value = """
-        INSERT INTO public.game_configs
-            (topic_id, config_key, config_value, is_active)
-        VALUES
-            (:topicId, :configKey, :configValue, :active)
-        ON CONFLICT (topic_id, config_key)
-            WHERE topic_id IS NOT NULL
-        DO UPDATE SET
-            config_value = EXCLUDED.config_value,
-            is_active = EXCLUDED.is_active
-        """, nativeQuery = true)
+    INSERT INTO public.game_configs AS current_config
+    (
+        topic_id,
+        config_key,
+        config_value,
+        description,
+        is_active
+    )
+    VALUES (
+        :topicId,
+        :configKey,
+        :configValue,
+        :description,
+        :active
+    )
+    ON CONFLICT (topic_id, config_key)
+    WHERE topic_id IS NOT NULL
+    DO UPDATE SET
+        config_value = EXCLUDED.config_value,
+        description = EXCLUDED.description,
+        is_active = EXCLUDED.is_active
+    """, nativeQuery = true)
     int upsertTopicConfig(
             @Param("topicId") Long topicId,
             @Param("configKey") String configKey,
             @Param("configValue") String configValue,
+            @Param("description") String description,
             @Param("active") boolean active
     );
 
@@ -110,5 +129,39 @@ public interface GameConfigRepository
     int deleteTopicOverride(
             @Param("topicId") Long topicId,
             @Param("configKey") String configKey
+    );
+
+    @Query(value = """
+    SELECT
+        set_config(
+            'app.audit_actor_user_id',
+            CAST(:actorUserId AS TEXT),
+            true
+        )
+        || '|'
+        ||
+        set_config(
+            'app.audit_actor_cognito_sub',
+            :actorCognitoSub,
+            true
+        )
+        || '|'
+        ||
+        set_config(
+            'app.audit_operation_id',
+            CAST(:operationId AS TEXT),
+            true
+        )
+    """, nativeQuery = true)
+    String setAuditContext(
+
+            @Param("actorUserId")
+            Long actorUserId,
+
+            @Param("actorCognitoSub")
+            String actorCognitoSub,
+
+            @Param("operationId")
+            UUID operationId
     );
 }

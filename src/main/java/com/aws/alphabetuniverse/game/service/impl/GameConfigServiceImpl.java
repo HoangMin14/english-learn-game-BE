@@ -3,6 +3,7 @@ package com.aws.alphabetuniverse.game.service.impl;
 
 import com.aws.alphabetuniverse.game.dto.EffectiveGameConfig;
 import com.aws.alphabetuniverse.game.dto.admin.GameConfigAdminResponse;
+import com.aws.alphabetuniverse.game.dto.admin.GameConfigAuditContext;
 import com.aws.alphabetuniverse.game.entity.GameConfig;
 import com.aws.alphabetuniverse.game.repository.GameConfigRepository;
 import com.aws.alphabetuniverse.game.service.GameConfigService;
@@ -58,22 +59,26 @@ public class GameConfigServiceImpl implements GameConfigService {
     @Transactional
     public GameConfigAdminResponse updateGlobalConfig(
             String configKey,
-            String configValue
+            String configValue,
+            String description,
+            GameConfigAuditContext auditContext
     ) {
         requireSupportedKey(configKey);
 
         String normalized =
                 normalizeConfigValue(configKey, configValue);
 
-        // Global luôn active.
-        // Tắt điểm/streak bằng configValue = "false",
-        // không tắt is_active của bản ghi global.
+        String normalizedDescription =
+                normalizeDescription(description);
+
+        applyAuditContext(auditContext);
+
         gameConfigRepository.upsertGlobalConfig(
                 configKey,
-                normalized
+                normalized,
+                normalizedDescription
         );
 
-        // Đọc lại dữ liệu sau upsert.
         return toGlobalResponse(requireGlobal(configKey));
     }
 
@@ -83,18 +88,27 @@ public class GameConfigServiceImpl implements GameConfigService {
             Long topicId,
             String configKey,
             String configValue,
-            boolean active
+            String description,
+            boolean active,
+            GameConfigAuditContext auditContext
     ) {
         validateTopicExists(topicId);
+
         requireSupportedKey(configKey);
 
         String normalized =
                 normalizeConfigValue(configKey, configValue);
 
+        String normalizedDescription =
+                normalizeDescription(description);
+
+        applyAuditContext(auditContext);
+
         gameConfigRepository.upsertTopicConfig(
                 topicId,
                 configKey,
                 normalized,
+                normalizedDescription,
                 active
         );
 
@@ -103,10 +117,25 @@ public class GameConfigServiceImpl implements GameConfigService {
 
     @Override
     @Transactional
-    public void resetTopicConfig(Long topicId) {
+    public void resetTopicConfig(
+            Long topicId,
+            String configKey,
+            GameConfigAuditContext auditContext
+    ) {
+        // 1. Kiểm tra topic tồn tại.
         validateTopicExists(topicId);
 
-        gameConfigRepository.deleteTopicOverrides(topicId);
+        // 2. Chỉ cho phép reset key được hỗ trợ.
+        requireSupportedKey(configKey);
+
+        // 3. Thiết lập thông tin Admin.
+        applyAuditContext(auditContext);
+
+        // 4. Xóa đúng một cấu hình override.
+        gameConfigRepository.deleteTopicOverride(
+                topicId,
+                configKey
+        );
     }
 
     @Override
@@ -154,21 +183,18 @@ public class GameConfigServiceImpl implements GameConfigService {
         );
     }
 
-    @Override
     @Transactional
+    @Override
     public void resetTopicConfig(
             Long topicId,
-            String configKey
+            GameConfigAuditContext auditContext
     ) {
-        validateTopicExists(topicId);
-        requireSupportedKey(configKey);
 
-        // Không có override cũng không gây lỗi.
-        // Global config không bị thay đổi.
-        gameConfigRepository.deleteTopicOverride(
-                topicId,
-                configKey
-        );
+        validateTopicExists(topicId);
+
+        applyAuditContext(auditContext);
+
+        gameConfigRepository.deleteTopicOverrides(topicId);
     }
 
 
@@ -223,7 +249,9 @@ public class GameConfigServiceImpl implements GameConfigService {
                 null,
                 null,
                 active ? global.getConfigValue() : null,
-                active ? "GLOBAL" : "GLOBAL_INACTIVE"
+                active ? "GLOBAL" : "GLOBAL_INACTIVE",
+                global.getDescription(),
+                null
         );
     }
 
@@ -268,7 +296,9 @@ public class GameConfigServiceImpl implements GameConfigService {
                 override == null ? null : override.getConfigValue(),
                 overrideActive,
                 effectiveValue,
-                source
+                source,
+                global.getDescription(),
+                override != null ? override.getDescription() : null
         );
     }
 
@@ -408,5 +438,40 @@ public class GameConfigServiceImpl implements GameConfigService {
         // Giả định GameConfig dùng Boolean isActive.
         // Nếu entity dùng boolean primitive, đổi thành config.isActive().
         return Boolean.TRUE.equals(config.getIsActive());
+    }
+
+    private void applyAuditContext(
+            GameConfigAuditContext context
+    ) {
+
+        if (context == null
+                || context.actorUserId() == null
+                || context.actorUserId() <= 0
+                || context.actorCognitoSub() == null
+                || context.actorCognitoSub().isBlank()
+                || context.operationId() == null) {
+
+            throw new IllegalArgumentException(
+                    "Invalid audit context"
+            );
+        }
+
+        gameConfigRepository.setAuditContext(
+                context.actorUserId(),
+                context.actorCognitoSub(),
+                context.operationId()
+        );
+    }
+
+    private String normalizeDescription(String description) {
+
+        if (description == null || description.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Description is required"
+            );
+        }
+
+        return description.trim();
     }
 }

@@ -1,13 +1,15 @@
-
-package com.aws.alphabetuniverse.game.controller;
+package com.aws.alphabetuniverse.admin.controller;
 
 import com.aws.alphabetuniverse.admin.service.AdminAccessService;
 import com.aws.alphabetuniverse.game.dto.admin.GameConfigAdminResponse;
+import com.aws.alphabetuniverse.game.dto.admin.GameConfigAuditContext;
 import com.aws.alphabetuniverse.game.dto.admin.GameConfigUpdateRequest;
 import com.aws.alphabetuniverse.game.service.GameConfigService;
+import com.aws.alphabetuniverse.user.entity.User;
 
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+
 import lombok.RequiredArgsConstructor;
 
 import org.springframework.http.HttpStatus;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/admin/game-configs")
@@ -29,24 +32,35 @@ public class AdminGameConfigController {
     private final GameConfigService gameConfigService;
     private final AdminAccessService adminAccessService;
 
-    // GET global config.
+
+    // ==========================================
+    // 1. GET GLOBAL CONFIG
+    // ==========================================
+
     @GetMapping("/global")
     public List<GameConfigAdminResponse> getGlobalConfigs(
             @AuthenticationPrincipal Jwt jwt
     ) {
+
         adminAccessService.requireActiveAdmin(jwt);
 
         return gameConfigService.getGlobalConfigs();
     }
 
-    // PUT global config.
+
+    // ==========================================
+    // 2. PUT GLOBAL CONFIG
+    // ==========================================
+
     @PutMapping("/global/{configKey}")
     public GameConfigAdminResponse updateGlobalConfig(
             @PathVariable String configKey,
-            @RequestBody GameConfigUpdateRequest request,
+            @RequestBody(required = false) GameConfigUpdateRequest request,
             @AuthenticationPrincipal Jwt jwt
     ) {
-        adminAccessService.requireActiveAdmin(jwt);
+
+        // Kiểm tra Admin và tạo Audit Context.
+        GameConfigAuditContext context = createAuditContext(jwt);
 
         if (request == null) {
             throw new ResponseStatusException(
@@ -55,6 +69,7 @@ public class AdminGameConfigController {
             );
         }
 
+        // Global config luôn phải ACTIVE.
         if (Boolean.FALSE.equals(request.active())) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -65,30 +80,40 @@ public class AdminGameConfigController {
 
         return gameConfigService.updateGlobalConfig(
                 configKey,
-                request.configValue()
+                request.configValue(),
+                request.description(),
+                context
         );
     }
 
-    // GET config theo topic, bao gồm global và giá trị hiệu lực.
+
+    // ==========================================
+    // 3. GET CONFIG THEO TOPIC
+    // ==========================================
+
     @GetMapping("/topics/{topicId}")
     public List<GameConfigAdminResponse> getTopicConfigs(
             @PathVariable Long topicId,
             @AuthenticationPrincipal Jwt jwt
     ) {
+
         adminAccessService.requireActiveAdmin(jwt);
 
         return gameConfigService.getTopicConfigs(topicId);
     }
 
-    // PUT override theo topic.
+
+    // ==========================================
+    // 4. PUT CONFIG OVERRIDE THEO TOPIC
+    // ==========================================
+
     @PutMapping("/topics/{topicId}/{configKey}")
     public GameConfigAdminResponse updateTopicConfig(
             @PathVariable Long topicId,
             @PathVariable String configKey,
-            @RequestBody GameConfigUpdateRequest request,
+            @RequestBody(required = false) GameConfigUpdateRequest request,
             @AuthenticationPrincipal Jwt jwt
     ) {
-        adminAccessService.requireActiveAdmin(jwt);
 
         if (request == null || request.active() == null) {
             throw new ResponseStatusException(
@@ -97,28 +122,45 @@ public class AdminGameConfigController {
             );
         }
 
+        // Kiểm tra Admin và tạo Audit Context.
+        GameConfigAuditContext context = createAuditContext(jwt);
+
         return gameConfigService.updateTopicConfig(
                 topicId,
                 configKey,
                 request.configValue(),
-                request.active()
+                request.description(),
+                request.active(),
+                context
         );
     }
 
-    // Xóa override của bốn key được hỗ trợ.
-    // Sau đó topic quay về dùng global config.
+
+    // ==========================================
+    // 5. DELETE TOÀN BỘ CONFIG OVERRIDE CỦA TOPIC
+    // ==========================================
+
     @DeleteMapping("/topics/{topicId}")
     public ResponseEntity<Void> resetTopicConfigs(
             @PathVariable Long topicId,
             @AuthenticationPrincipal Jwt jwt
     ) {
-        adminAccessService.requireActiveAdmin(jwt);
 
-        gameConfigService.resetTopicConfig(topicId);
+        // Mỗi lần reset tạo một operationId riêng.
+        GameConfigAuditContext context = createAuditContext(jwt);
+
+        gameConfigService.resetTopicConfig(
+                topicId,
+                context
+        );
 
         return ResponseEntity.noContent().build();
     }
 
+
+    // ==========================================
+    // 6. DELETE MỘT CONFIG OVERRIDE
+    // ==========================================
 
     @DeleteMapping("/topics/{topicId}/{configKey}")
     public ResponseEntity<Void> resetTopicConfig(
@@ -126,14 +168,31 @@ public class AdminGameConfigController {
             @PathVariable String configKey,
             @AuthenticationPrincipal Jwt jwt
     ) {
-        adminAccessService.requireActiveAdmin(jwt);
+
+        GameConfigAuditContext context = createAuditContext(jwt);
 
         gameConfigService.resetTopicConfig(
                 topicId,
-                configKey
+                configKey,
+                context
         );
 
         return ResponseEntity.noContent().build();
     }
 
+
+    // ==========================================
+    // 7. CREATE AUDIT CONTEXT
+    // ==========================================
+
+    private GameConfigAuditContext createAuditContext(Jwt jwt) {
+
+        User admin = adminAccessService.requireActiveAdmin(jwt);
+
+        return new GameConfigAuditContext(
+                admin.getId(),
+                jwt.getSubject(),
+                UUID.randomUUID()
+        );
+    }
 }

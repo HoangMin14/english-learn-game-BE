@@ -8,6 +8,8 @@ public record GameConfigAdminResponse(
         String overrideValue,
         Boolean overrideActive,
         String effectiveValue,
-        String source
+        String source,
+        String globalDescription,
+        String overrideDescription
 ) {
 }
