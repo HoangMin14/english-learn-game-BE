@@ -3,6 +3,9 @@ package com.aws.alphabetuniverse.auth.service;
 import com.aws.alphabetuniverse.auth.dto.*;
 import com.aws.alphabetuniverse.user.dto.UserResponse;
 import org.springframework.security.oauth2.jwt.Jwt;
+import com.aws.alphabetuniverse.auth.dto.RefreshTokenRequest;
+import com.aws.alphabetuniverse.auth.dto.RefreshTokenResponse;
+import com.aws.alphabetuniverse.auth.dto.ResendConfirmationResponse;
 
 public interface AuthService {
     public UserResponse syncUser(Jwt jwt);
@@ -12,4 +15,6 @@ public interface AuthService {
     public RegisterResponse register(RegisterRequest request);
     public ConfirmRegisterResponse confirmRegister (ConfirmRegisterRequest request);
     public LoginResponse login(LoginRequest request);
+    public RefreshTokenResponse refreshToken(RefreshTokenRequest request);
+    public ResendConfirmationResponse resendConfirmationCode(String email);
 }

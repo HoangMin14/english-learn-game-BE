@@ -2,6 +2,7 @@ package com.aws.alphabetuniverse.admin.service.impl;
 
 import com.aws.alphabetuniverse.admin.dto.AdminUserPageResponse;
 import com.aws.alphabetuniverse.admin.dto.AdminUserResponse;
+import com.aws.alphabetuniverse.admin.dto.AdminUserStatusResponse;
 import com.aws.alphabetuniverse.admin.service.AdminUserService;
 
 import com.aws.alphabetuniverse.user.entity.User;
@@ -23,6 +24,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import jakarta.persistence.criteria.Predicate;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -211,6 +214,94 @@ public class AdminUserServiceImpl implements AdminUserService {
         );
     }
 
+    @Override
+    @Transactional
+    public AdminUserStatusResponse updateUserStatus(
+            Long userId,
+            String status,
+            Long adminUserId
+    ) {
+
+        // 1. Kiểm tra User ID.
+        if (userId == null || userId <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Invalid userId"
+            );
+        }
+
+        // 2. Kiểm tra Admin ID.
+        // ID này được Controller lấy từ Admin đã xác thực.
+        if (adminUserId == null || adminUserId <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Admin authentication is required"
+            );
+        }
+
+        // 3. Chuẩn hóa trạng thái yêu cầu.
+        String normalizedStatus = normalizeRequestedStatus(status);
+
+        // 4. Lấy và khóa bản ghi User.
+        User targetUser = userRepository
+                .findByIdForUpdate(userId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "User not found"
+                ));
+
+        // 5. Không cho Admin tự khóa chính mình.
+        // Kiểm tra trước role để trường hợp này trả 409.
+        if (targetUser.getId().equals(adminUserId)
+                && "BLOCKED".equals(normalizedStatus)) {
+
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Admin cannot block their own account"
+            );
+        }
+
+        // 6. Chỉ cho phép quản lý Learner.
+        String targetRole = targetUser.getRole() == null
+                ? ""
+                : targetUser.getRole()
+                  .trim()
+                  .toLowerCase(Locale.ROOT);
+
+        if (targetRole.startsWith("role_")) {
+            targetRole = targetRole.substring(5);
+        }
+
+        if (!"learner".equals(targetRole)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Admin can only manage learner accounts"
+            );
+        }
+
+        // 7. Nếu trạng thái đã giống yêu cầu thì trả 200.
+        // Không cập nhật updatedAt trong trường hợp này.
+        if (normalizedStatus.equalsIgnoreCase(
+                String.valueOf(targetUser.getStatus()))) {
+
+            return toStatusResponse(targetUser);
+        }
+
+        // 8. Cập nhật trạng thái.
+        targetUser.setStatus(normalizedStatus);
+
+        // Lưu thời gian theo UTC.
+        targetUser.setUpdatedAt(
+                LocalDateTime.now(ZoneOffset.UTC)
+        );
+
+        // 9. Lưu và flush để phát hiện lỗi DB ngay trong method.
+        User updatedUser = userRepository.saveAndFlush(targetUser);
+
+        // 10. Trả kết quả.
+        return toStatusResponse(updatedUser);
+    }
+
 
     // ==========================================
     // HELPER METHODS
@@ -300,6 +391,51 @@ public class AdminUserServiceImpl implements AdminUserService {
                           .toUpperCase(Locale.ROOT),
 
                 user.getCreatedAt()
+        );
+    }
+
+    private String normalizeRequestedStatus(String status) {
+
+        if (status == null || status.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Status is required"
+            );
+        }
+
+        String normalized = status
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        if (!VALID_STATUSES.contains(normalized)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Status must be ACTIVE or BLOCKED"
+            );
+        }
+
+        return normalized;
+    }
+
+    private AdminUserStatusResponse toStatusResponse(User user) {
+
+        return new AdminUserStatusResponse(
+
+                user.getId(),
+
+                user.getEmail(),
+
+                user.getDisplayName(),
+
+                user.getRole() == null
+                        ? null
+                        : user.getRole().toLowerCase(Locale.ROOT),
+
+                user.getStatus() == null
+                        ? null
+                        : user.getStatus().toUpperCase(Locale.ROOT),
+
+                user.getUpdatedAt()
         );
     }
 }

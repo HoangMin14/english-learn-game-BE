@@ -1,6 +1,7 @@
 package com.aws.alphabetuniverse.admin.service;
 
 import com.aws.alphabetuniverse.admin.dto.AdminUserPageResponse;
+import com.aws.alphabetuniverse.admin.dto.AdminUserStatusResponse;
 
 public interface AdminUserService {
 
@@ -10,5 +11,12 @@ public interface AdminUserService {
             String keyword,
             String role,
             String status
+    );
+
+    // API PATCH khóa / mở khóa User.
+    AdminUserStatusResponse updateUserStatus(
+            Long userId,
+            String status,
+            Long adminUserId
     );
 }

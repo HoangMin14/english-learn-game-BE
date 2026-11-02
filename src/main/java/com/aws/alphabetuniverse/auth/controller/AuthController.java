@@ -6,6 +6,7 @@ import com.aws.alphabetuniverse.user.dto.UserResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -39,31 +40,49 @@ public class AuthController {
 
     @PostMapping("/forgot-password")
     public ForgotPasswordResponse forgotPassword(
-            @RequestBody ForgotPasswordRequest request
-    ){
+            @Valid @RequestBody ForgotPasswordRequest request
+    ) {
         return authService.forgotPassword(request);
     }
 
     @PostMapping("/reset-password")
     public ResetPasswordResponse resetPassword(
-            @RequestBody ResetPasswordRequest request
-    ){
+            @Valid @RequestBody ResetPasswordRequest request
+    ) {
         return authService.resetPassword(request);
     }
 
     @PostMapping("/register")
-    public RegisterResponse register(@RequestBody RegisterRequest request){
+    public RegisterResponse register(
+            @Valid @RequestBody RegisterRequest request
+    ) {
         return authService.register(request);
     }
 
     @PostMapping("/confirm-register")
-    public ConfirmRegisterResponse confirmRegister(@RequestBody ConfirmRegisterRequest request){
+    public ConfirmRegisterResponse confirmRegister(
+            @Valid @RequestBody ConfirmRegisterRequest request
+    ) {
         return authService.confirmRegister(request);
     }
 
     @PostMapping("/login")
-    public LoginResponse login(@RequestBody LoginRequest request){
+    public LoginResponse login(
+            @Valid @RequestBody LoginRequest request
+    ) {
         return authService.login(request);
+    }
+
+    @PostMapping("/refresh")
+    public ResponseEntity<RefreshTokenResponse> refreshToken(@Valid @RequestBody RefreshTokenRequest request) {
+        RefreshTokenResponse response = authService.refreshToken(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/resend-confirmation")
+    public ResponseEntity<ResendConfirmationResponse> resendConfirmationCode(@Valid @RequestBody ResendConfirmationRequest request) {
+        ResendConfirmationResponse response = authService.resendConfirmationCode(request.email());
+        return ResponseEntity.ok(response);
     }
 
 }
