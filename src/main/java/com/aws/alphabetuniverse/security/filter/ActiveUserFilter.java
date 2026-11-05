@@ -1,5 +1,6 @@
 package com.aws.alphabetuniverse.security.filter;
 
+import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
 
@@ -102,6 +103,15 @@ public class ActiveUserFilter extends OncePerRequestFilter {
         }
 
         // 4. Kiểm tra trạng thái.
+        if ("BLOCKED".equalsIgnoreCase(user.getStatus())) {
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+            response.getWriter().write("{\"code\":\"" + AccountBlockedException.CODE
+                    + "\",\"message\":\"" + AccountBlockedException.MESSAGE + "\"}");
+            return;
+        }
+
         if (!"ACTIVE".equalsIgnoreCase(
                 String.valueOf(user.getStatus()))) {
 

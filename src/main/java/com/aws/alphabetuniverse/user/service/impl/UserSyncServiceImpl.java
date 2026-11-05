@@ -1,5 +1,6 @@
 package com.aws.alphabetuniverse.user.service.impl;
 
+import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
 import com.aws.alphabetuniverse.user.dto.CognitoUserProfile;
 import com.aws.alphabetuniverse.user.dto.UserResponse;
 import com.aws.alphabetuniverse.user.entity.User;
@@ -84,6 +85,9 @@ public class UserSyncServiceImpl implements UserSyncService {
 
         // 4. Check local account status.
         // Never automatically reactivate BLOCKED accounts.
+        if ("BLOCKED".equalsIgnoreCase(user.getStatus())) {
+            throw new AccountBlockedException();
+        }
         if (!"ACTIVE".equalsIgnoreCase(
                 String.valueOf(user.getStatus()))) {
 

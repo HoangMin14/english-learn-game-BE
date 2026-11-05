@@ -19,6 +19,21 @@ import java.util.Set;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(AccountBlockedException.class)
+    public ResponseEntity<Map<String, String>> handleAccountBlocked(AccountBlockedException exception) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of(
+                "code", AccountBlockedException.CODE,
+                "message", AccountBlockedException.MESSAGE
+        ));
+    }
+
+    @ExceptionHandler(CognitoUserStatusSyncException.class)
+    public ResponseEntity<Map<String, String>> handleCognitoStatusSync(CognitoUserStatusSyncException exception) {
+        return ResponseEntity.status(exception.getStatusCode())
+                .headers(exception.getHeaders())
+                .body(Map.of("code", exception.getCode(), "message", exception.getReason()));
+    }
+
     // Các constraint/index UNIQUE email đã xác nhận trên DB.
     private static final Set<String> EMAIL_UNIQUE_CONSTRAINTS =
             Set.of(

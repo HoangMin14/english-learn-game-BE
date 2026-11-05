@@ -4,6 +4,8 @@ import com.aws.alphabetuniverse.admin.dto.AdminUserPageResponse;
 import com.aws.alphabetuniverse.admin.dto.AdminUserResponse;
 import com.aws.alphabetuniverse.admin.dto.AdminUserStatusResponse;
 import com.aws.alphabetuniverse.admin.service.AdminUserService;
+import com.aws.alphabetuniverse.auth.service.CognitoUserAdminService;
+import com.aws.alphabetuniverse.common.exception.CognitoUserStatusSyncException;
 
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
@@ -37,6 +39,7 @@ import java.util.Set;
 public class AdminUserServiceImpl implements AdminUserService {
 
     private final UserRepository userRepository;
+    private final CognitoUserAdminService cognitoUserAdminService;
 
     private static final Set<String> VALID_ROLES =
             Set.of("admin", "learner");
@@ -215,7 +218,7 @@ public class AdminUserServiceImpl implements AdminUserService {
     }
 
     @Override
-    @Transactional
+    @Transactional(noRollbackFor = CognitoUserStatusSyncException.class)
     public AdminUserStatusResponse updateUserStatus(
             Long userId,
             String status,
@@ -279,27 +282,36 @@ public class AdminUserServiceImpl implements AdminUserService {
             );
         }
 
-        // 7. Nếu trạng thái đã giống yêu cầu thì trả 200.
-        // Không cập nhật updatedAt trong trường hợp này.
-        if (normalizedStatus.equalsIgnoreCase(
-                String.valueOf(targetUser.getStatus()))) {
-
-            return toStatusResponse(targetUser);
+        if ("BLOCKED".equals(normalizedStatus)) {
+            // Commit the local block even when AWS fails. The exception below is
+            // deliberately excluded from rollback; database errors still roll back.
+            updateLocalStatus(targetUser, normalizedStatus);
+            try {
+                cognitoUserAdminService.disableUser(targetUser.getCognitoSub());
+            } catch (CognitoUserStatusSyncException ex) {
+                throw new CognitoUserStatusSyncException(ex.getStatusCode(), ex.getCode(),
+                        "Đã khóa tài khoản trên hệ thống, nhưng chưa xác nhận khóa trên Cognito. "
+                                + ex.getReason()
+                                + " Sau khi xử lý nguyên nhân, gửi lại yêu cầu BLOCKED để đồng bộ.", ex);
+            }
+        } else {
+            // Enable Cognito first. On failure a previously blocked local account
+            // stays blocked, and Login / protected APIs continue to reject it.
+            cognitoUserAdminService.enableUser(targetUser.getCognitoSub());
+            updateLocalStatus(targetUser, normalizedStatus);
         }
 
-        // 8. Cập nhật trạng thái.
-        targetUser.setStatus(normalizedStatus);
+        // Repeat the AWS operation even when local status already matches, so an
+        // Admin retry can reconcile a previous timeout or failed AWS request.
+        return toStatusResponse(targetUser);
+    }
 
-        // Lưu thời gian theo UTC.
-        targetUser.setUpdatedAt(
-                LocalDateTime.now(ZoneOffset.UTC)
-        );
-
-        // 9. Lưu và flush để phát hiện lỗi DB ngay trong method.
-        User updatedUser = userRepository.saveAndFlush(targetUser);
-
-        // 10. Trả kết quả.
-        return toStatusResponse(updatedUser);
+    private void updateLocalStatus(User user, String status) {
+        if (!status.equalsIgnoreCase(String.valueOf(user.getStatus()))) {
+            user.setStatus(status);
+            user.setUpdatedAt(LocalDateTime.now(ZoneOffset.UTC));
+            userRepository.saveAndFlush(user);
+        }
     }
 
 

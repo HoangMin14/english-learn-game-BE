@@ -10,6 +10,7 @@ import com.aws.alphabetuniverse.game.repository.SessionAttemptRepository;
 import com.aws.alphabetuniverse.game.service.*;
 import com.aws.alphabetuniverse.learning.entity.UserTopicLearningProgress;
 import com.aws.alphabetuniverse.learning.repository.UserTopicLearningProgressRepository;
+import com.aws.alphabetuniverse.storage.service.S3StorageService;
 import com.aws.alphabetuniverse.topic.entity.Topic;
 import com.aws.alphabetuniverse.topic.repository.TopicRepository;
 import com.aws.alphabetuniverse.user.entity.User;
@@ -54,6 +55,7 @@ public class GameSessionServiceImpl implements GameSessionService {
     private final SessionAttemptRepository sessionAttemptRepository;
     private final GameUserAuthorizationService gameUserAuthorizationService;
     private final GameSessionProgressResolverService progressResolver;
+    private final S3StorageService s3StorageService;
 
     @Override
     @Transactional(isolation = Isolation.REPEATABLE_READ)
@@ -301,7 +303,8 @@ public class GameSessionServiceImpl implements GameSessionService {
                                     vocabulary.getWord(),
                                     vocabulary.getMeaningVi(),
                                     scrambleLetters(vocabulary.getWord()),
-                                    topicPosition
+                                    topicPosition,
+                                    validAudioKeyOrNull(vocabulary.getAudioUrl())
                             );
                         })
                         .toList();
@@ -375,7 +378,8 @@ public class GameSessionServiceImpl implements GameSessionService {
                                 new GameQuestionResponse(
                                         snapshot.vocabularyId(),
                                         snapshot.meaningVi(),
-                                        snapshot.scrambledLetters()
+                                        snapshot.scrambledLetters(),
+                                        resolveAudioUrl(snapshot.audioKey())
                                 )
                         )
                         .toList();
@@ -630,12 +634,21 @@ public class GameSessionServiceImpl implements GameSessionService {
                 progress.maxAttemptsPerWord() - currentAttemptsUsed
         );
 
+        // Phiên cũ có thể chưa lưu audioKey trong JSON snapshot.
+        Map<Long, String> legacyAudioKeys =
+                findLegacyAudioKeys(progress, topicId);
+
         // 8. Chỉ trả các trường an toàn, không trả snapshot nguyên bản.
         List<GameResumeQuestionResponse> questions =
                 progress.questionIds().stream()
                         .map(vocabularyId -> {
                             GameQuestionSnapshot snapshot =
                                     progress.snapshotById().get(vocabularyId);
+
+                            String audioKey = snapshot.audioKey();
+                            if (audioKey == null || audioKey.isBlank()) {
+                                audioKey = legacyAudioKeys.get(vocabularyId);
+                            }
 
                             return new GameResumeQuestionResponse(
                                     snapshot.vocabularyId(),
@@ -647,7 +660,8 @@ public class GameSessionServiceImpl implements GameSessionService {
                                             currentVocabularyId
                                     ),
                                     progress.attemptsUsed(vocabularyId),
-                                    progress.hasCorrectAttempt(vocabularyId)
+                                    progress.hasCorrectAttempt(vocabularyId),
+                                    resolveAudioUrl(audioKey)
                             );
                         })
                         .toList();
@@ -673,6 +687,61 @@ public class GameSessionServiceImpl implements GameSessionService {
                 );
 
         return Optional.of(response);
+    }
+
+    private String resolveAudioUrl(String audioKey) {
+        String storedAudioKey = validAudioKeyOrNull(audioKey);
+        if (storedAudioKey == null) {
+            return null;
+        }
+
+        // URL có thời hạn chỉ dùng trong response, không lưu vào snapshot.
+        return s3StorageService.generatePresignedAudioGetUrl(storedAudioKey);
+    }
+
+    private String validAudioKeyOrNull(String audioKey) {
+        if (audioKey == null
+                || audioKey.isBlank()
+                || !audioKey.startsWith("vocabulary-audio/")) {
+            return null;
+        }
+
+        return audioKey;
+    }
+
+    private Map<Long, String> findLegacyAudioKeys(
+            GameSessionProgressResolverService.Progress progress,
+            Long topicId
+    ) {
+        List<Long> missingAudioIds = progress.questionIds().stream()
+                .filter(id -> {
+                    String audioKey = progress.snapshotById().get(id).audioKey();
+                    return audioKey == null || audioKey.isBlank();
+                })
+                .toList();
+
+        if (missingAudioIds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<Long, String> audioKeys = new HashMap<>();
+
+        // Đọc một lần cho cả phiên; không truy vấn riêng từng câu hỏi.
+        for (Vocabulary vocabulary : vocabularyRepository.findAllById(missingAudioIds)) {
+            GameQuestionSnapshot snapshot =
+                    progress.snapshotById().get(vocabulary.getId());
+
+            if (snapshot != null
+                    && vocabulary.getTopic() != null
+                    && topicId.equals(vocabulary.getTopic().getId())
+                    && vocabulary.getWord() != null
+                    && snapshot.word().strip().equalsIgnoreCase(
+                            vocabulary.getWord().strip())) {
+                audioKeys.put(vocabulary.getId(), vocabulary.getAudioUrl());
+            }
+        }
+
+        return audioKeys;
     }
 
     @Override

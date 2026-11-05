@@ -7,6 +7,7 @@ public record GameQuestionSnapshot(
         String word,
         String meaningVi,
         List<String> scrambledLetters,
-        Integer topicPosition
+        Integer topicPosition,
+        String audioKey
 ) {
 }

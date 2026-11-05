@@ -4,6 +4,7 @@ import com.aws.alphabetuniverse.auth.dto.*;
 import com.aws.alphabetuniverse.auth.dto.ForgotPasswordRequest;
 import com.aws.alphabetuniverse.auth.dto.ForgotPasswordResponse;
 import com.aws.alphabetuniverse.auth.service.AuthService;
+import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
 import com.aws.alphabetuniverse.user.dto.UserResponse;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
@@ -17,6 +18,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -156,6 +158,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public LoginResponse login(LoginRequest request) {
 
         // Bảo vệ cả trường hợp service được gọi trực tiếp.
@@ -175,6 +178,11 @@ public class AuthServiceImpl implements AuthService {
 
         // Giữ nguyên mật khẩu, không trim().
         String password = request.getPassword();
+
+        // Lock on the first read so Admin block/unblock cannot change this local
+        // account while Login is in progress. First-time users may not exist yet.
+        userRepository.findByEmailIgnoreCaseForUpdate(email)
+                .ifPresent(this::assertAccountActive);
 
         try {
             InitiateAuthResponse response =
@@ -222,6 +230,25 @@ public class AuthServiceImpl implements AuthService {
                         "Cognito returned an invalid authentication result"
                 );
             }
+
+            // Verify the returned token and use its authenticated sub, not just
+            // the input email (which can differ from a previously synced email).
+            Jwt authenticatedJwt;
+            try {
+                authenticatedJwt = jwtDecoder.decode(result.accessToken());
+            } catch (JwtException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Cognito returned an invalid access token", ex);
+            }
+
+            if (authenticatedJwt == null || authenticatedJwt.getSubject() == null
+                    || authenticatedJwt.getSubject().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Cognito returned an invalid user identity");
+            }
+
+            userRepository.findByCognitoSubForUpdate(authenticatedJwt.getSubject())
+                    .ifPresent(this::assertAccountActive);
 
             return LoginResponse.builder()
                     .accessToken(result.accessToken())
@@ -279,6 +306,15 @@ public class AuthServiceImpl implements AuthService {
                     "Unable to connect to Cognito",
                     ex
             );
+        }
+    }
+
+    private void assertAccountActive(User user) {
+        if ("BLOCKED".equalsIgnoreCase(user.getStatus())) {
+            throw new AccountBlockedException();
+        }
+        if (!"ACTIVE".equalsIgnoreCase(user.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Account is not active");
         }
     }
 
@@ -411,16 +447,7 @@ public class AuthServiceImpl implements AuthService {
                     );
 
             // 8. Chỉ cho phép tài khoản ACTIVE.
-            String userStatus =
-                    String.valueOf(user.getStatus());
-
-            if (!"ACTIVE".equalsIgnoreCase(userStatus)) {
-
-                throw new ResponseStatusException(
-                        HttpStatus.FORBIDDEN,
-                        "Account is not active"
-                );
-            }
+            assertAccountActive(user);
 
             // 9. Trả token mới.
             // REFRESH_TOKEN_AUTH không cấp refresh token mới

@@ -165,10 +165,10 @@ public class S3StorageServiceImpl implements S3StorageService {
             );
         }
 
-        // Tạo S3 object key theo Topic và từ vựng
+        // Mỗi bản audio có key riêng để không ghi đè file mà phiên cũ đang dùng.
         String key = AUDIO_PREFIX
                 + "topic-" + topicId + "/"
-                + fileName + ".mp3";
+                + fileName + "-" + UUID.randomUUID() + ".mp3";
 
         PutObjectRequest request = PutObjectRequest.builder()
                 .bucket(bucketName)

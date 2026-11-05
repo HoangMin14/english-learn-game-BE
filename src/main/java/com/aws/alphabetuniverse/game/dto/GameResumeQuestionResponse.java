@@ -10,6 +10,7 @@ public record GameResumeQuestionResponse(
         Integer topicPosition,
         String status,
         int attemptsUsed,
-        boolean correctlyAnswered
+        boolean correctlyAnswered,
+        String audioUrl
 ) {
 }
