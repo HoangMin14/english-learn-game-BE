@@ -1,5 +1,6 @@
 package com.aws.alphabetuniverse.user.service.impl;
 
+import com.aws.alphabetuniverse.common.exception.CognitoOAuthException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -104,6 +105,43 @@ class CognitoUserAttributeServiceImplTest {
         assertEquals(HttpStatus.UNAUTHORIZED, assertThrows(ResponseStatusException.class,
                 () -> service.getProfile(" ")).getStatusCode());
         verifyNoInteractions(client);
+    }
+
+    @ParameterizedTest
+    @MethodSource("codedErrors")
+    void profileFailuresExposeContractCodeWithoutLeakingProviderDetails(
+            CognitoIdentityProviderException failure, String expectedCode
+    ) {
+        when(client.getUser(any(GetUserRequest.class))).thenThrow(failure);
+
+        var error = assertThrows(CognitoOAuthException.class, () -> service.getProfile("access-token"));
+
+        assertEquals(expectedCode, error.getCode());
+        assertFalse(error.getReason().contains("private-provider-details"));
+        assertNull(error.getCause());
+    }
+
+    static Stream<Arguments> codedErrors() {
+        return Stream.of(
+                Arguments.of(NotAuthorizedException.builder().message("private-provider-details").build(),
+                        "UNAUTHORIZED"),
+                Arguments.of(TooManyRequestsException.builder().message("private-provider-details").build(),
+                        "TOO_MANY_REQUESTS"),
+                Arguments.of(ForbiddenException.builder().message("private-provider-details").build(),
+                        "COGNITO_OAUTH_FORBIDDEN"),
+                Arguments.of(CognitoIdentityProviderException.builder().statusCode(500)
+                        .message("private-provider-details").build(), "COGNITO_UNAVAILABLE"));
+    }
+
+    @Test
+    void profileNetworkErrorReturns503WithStableCode() {
+        when(client.getUser(any(GetUserRequest.class))).thenThrow(SdkClientException.create("private-details"));
+
+        var error = assertThrows(CognitoOAuthException.class, () -> service.getProfile("access-token"));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, error.getStatusCode());
+        assertEquals("COGNITO_UNAVAILABLE", error.getCode());
+        assertNull(error.getCause());
     }
 
     private GetUserResponse profile(String name) {

@@ -1,6 +1,8 @@
 package com.aws.alphabetuniverse.user.service.impl;
 
 import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
+import com.aws.alphabetuniverse.common.exception.CognitoOAuthException;
+import com.aws.alphabetuniverse.common.exception.EmailAlreadyExistsException;
 import com.aws.alphabetuniverse.user.dto.CognitoUserProfile;
 import com.aws.alphabetuniverse.user.dto.UserResponse;
 import com.aws.alphabetuniverse.user.entity.User;
@@ -50,37 +52,49 @@ public class UserSyncServiceImpl implements UserSyncService {
         User user = userRepository
                 .findByCognitoSubForUpdate(cognitoSub)
                 .orElse(null);
+        CognitoUserProfile currentProfile = null;
 
         // 3. First-time synchronization.
         if (user == null) {
 
             // Read Cognito profile to create local User.
-            CognitoUserProfile initialProfile =
-                    cognitoUserAttributeService.getProfile(accessToken);
+            CognitoUserProfile initialProfile = readProfile(accessToken);
+            String initialEmail = initialProfile.email().trim();
 
-            validateEmail(initialProfile.email());
+            // Precheck before INSERT; UNIQUE remains the final protection against races.
+            User emailOwner = userRepository.findByEmailIgnoreCase(initialEmail).orElse(null);
+            if (emailOwner != null && !cognitoSub.equals(emailOwner.getCognitoSub())) {
+                throw new EmailAlreadyExistsException();
+            }
 
             LocalDateTime now =
                     LocalDateTime.now(ZoneOffset.UTC);
 
             // Keep the existing 7-parameter repository method.
-            userRepository.insertIfAbsent(
+            int inserted = userRepository.insertIfAbsent(
                     cognitoSub,
-                    initialProfile.email().trim(),
-                    DisplayNameNormalizer.normalizeFromCognito(initialProfile.displayName()),
+                    initialEmail,
+                    initialDisplayName(initialProfile),
                     "learner",
                     "ACTIVE",
                     now,
                     now
             );
 
-            // Read again and lock the created/existing User.
+            // insertIfAbsent clears the persistence context, including any emailOwner.
+            // Lock a fresh entity even if another Sync created the same sub meanwhile.
             user = userRepository
                     .findByCognitoSubForUpdate(cognitoSub)
                     .orElseThrow(() -> new ResponseStatusException(
                             HttpStatus.INTERNAL_SERVER_ERROR,
                             "Unable to synchronize user"
                     ));
+
+            // We own a newly inserted row and can reuse its initial profile.
+            // INSERT 0 means another request won; reread Cognito after locking below.
+            if (inserted == 1) {
+                currentProfile = initialProfile;
+            }
         }
 
         // 4. Check local account status.
@@ -91,18 +105,18 @@ public class UserSyncServiceImpl implements UserSyncService {
         if (!"ACTIVE".equalsIgnoreCase(
                 String.valueOf(user.getStatus()))) {
 
-            throw new ResponseStatusException(
+            throw new CognitoOAuthException(
                     HttpStatus.FORBIDDEN,
-                    "Your account is blocked or inactive"
+                    "ACCOUNT_INACTIVE",
+                    "Account is not active"
             );
         }
 
         // 5. Read Cognito AFTER acquiring the database lock.
         // This prevents stale profile data from overwriting newer data.
-        CognitoUserProfile currentProfile =
-                cognitoUserAttributeService.getProfile(accessToken);
-
-        validateEmail(currentProfile.email());
+        if (currentProfile == null) {
+            currentProfile = readProfile(accessToken);
+        }
 
         String email = currentProfile.email().trim();
 
@@ -115,10 +129,7 @@ public class UserSyncServiceImpl implements UserSyncService {
                 user.getId()
         )) {
 
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT,
-                    "Email is already used by another account"
-            );
+            throw new EmailAlreadyExistsException();
         }
 
         // 7. Update only changed fields.
@@ -161,15 +172,33 @@ public class UserSyncServiceImpl implements UserSyncService {
     // VALIDATION
     // ==========================================
 
-    private void validateEmail(String email) {
+    private CognitoUserProfile readProfile(String accessToken) {
+        CognitoUserProfile profile = cognitoUserAttributeService.getProfile(accessToken);
+        if (profile == null || profile.email() == null || profile.email().isBlank()) {
 
-        if (email == null || email.isBlank()) {
-
-            throw new ResponseStatusException(
+            throw new CognitoOAuthException(
                     HttpStatus.BAD_GATEWAY,
+                    "COGNITO_OAUTH_INVALID_RESPONSE",
                     "Cognito profile does not contain a valid email"
             );
         }
+        return profile;
+    }
+
+    private String initialDisplayName(CognitoUserProfile profile) {
+        String name = DisplayNameNormalizer.normalizeFromCognito(profile.displayName());
+        if (name != null) {
+            return name;
+        }
+        String email = profile.email().strip();
+        int separator = email.indexOf('@');
+        String fallback = DisplayNameNormalizer.normalizeFromCognito(
+                separator >= 0 ? email.substring(0, separator) : email);
+        if (fallback == null) {
+            return "Learner";
+        }
+        int end = fallback.offsetByCodePoints(0, Math.min(100, fallback.codePointCount(0, fallback.length())));
+        return fallback.substring(0, end);
     }
 
 }

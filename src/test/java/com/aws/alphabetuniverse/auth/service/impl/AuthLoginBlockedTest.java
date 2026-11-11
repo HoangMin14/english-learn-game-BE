@@ -1,6 +1,7 @@
 package com.aws.alphabetuniverse.auth.service.impl;
 
 import com.aws.alphabetuniverse.auth.controller.AuthController;
+import com.aws.alphabetuniverse.auth.config.CognitoOAuthSettings;
 import com.aws.alphabetuniverse.auth.dto.LoginRequest;
 import com.aws.alphabetuniverse.auth.dto.RefreshTokenRequest;
 import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
@@ -45,6 +46,9 @@ class AuthLoginBlockedTest {
         ReflectionTestUtils.setField(service, "cognitoClient", cognito);
         ReflectionTestUtils.setField(service, "jwtDecoder", decoder);
         ReflectionTestUtils.setField(service, "clientId", "test-client");
+        ReflectionTestUtils.setField(service, "oauthSettings", new CognitoOAuthSettings(
+                "https://test.auth.us-east-1.amazoncognito.com", "test-client",
+                "http://localhost:5173/callback", "http://localhost:5173", "sdk"));
         user = User.builder().id(7L).cognitoSub("sub-7").email("user@example.com")
                 .role("learner").status("ACTIVE").build();
         when(users.findByEmailIgnoreCaseForUpdate("User@example.com"))

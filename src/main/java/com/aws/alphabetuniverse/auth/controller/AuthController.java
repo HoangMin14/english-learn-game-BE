@@ -9,6 +9,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.CacheControl;
+import org.springframework.http.HttpHeaders;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,7 +25,10 @@ public class AuthController {
     @Autowired
     private AuthService authService;
 
-    @Operation(security = {@SecurityRequirement(name = "Bearer Authentication")})
+    @Operation(summary = "Đồng bộ hồ sơ Cognito vào database",
+            description = "Trả 409 EMAIL_ALREADY_EXISTS nếu email thuộc Cognito sub khác. "
+                    + "FE chỉ hoàn tất đăng nhập khi Sync trả user ACTIVE.",
+            security = {@SecurityRequirement(name = "Bearer Authentication")})
     @PostMapping("/sync")
     public ResponseEntity<UserResponse> syncUser(
             @AuthenticationPrincipal Jwt jwt
@@ -76,7 +81,18 @@ public class AuthController {
     @PostMapping("/refresh")
     public ResponseEntity<RefreshTokenResponse> refreshToken(@Valid @RequestBody RefreshTokenRequest request) {
         RefreshTokenResponse response = authService.refreshToken(request);
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.PRAGMA, "no-cache").body(response);
+    }
+
+    @PostMapping("/google")
+    @Operation(summary = "Đăng nhập Google bằng authorization code và PKCE",
+            description = "Không gửi Bearer token. API chỉ đổi code và kiểm tra token/trạng thái local; "
+                    + "chưa tạo user hoặc kiểm tra email. Sau đó gọi POST /api/auth/sync bằng accessToken mới.")
+    public ResponseEntity<LoginResponse> loginWithGoogle(@Valid @RequestBody GoogleAuthRequest request) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.PRAGMA, "no-cache")
+                .body(authService.loginWithGoogle(request));
     }
 
     @PostMapping("/resend-confirmation")

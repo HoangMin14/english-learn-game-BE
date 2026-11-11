@@ -15,6 +15,7 @@ public interface AuthService {
     public RegisterResponse register(RegisterRequest request);
     public ConfirmRegisterResponse confirmRegister (ConfirmRegisterRequest request);
     public LoginResponse login(LoginRequest request);
+    public LoginResponse loginWithGoogle(GoogleAuthRequest request);
     public RefreshTokenResponse refreshToken(RefreshTokenRequest request);
     public ResendConfirmationResponse resendConfirmationCode(String email);
 }

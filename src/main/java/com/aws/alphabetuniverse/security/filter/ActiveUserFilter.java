@@ -49,6 +49,7 @@ public class ActiveUserFilter extends OncePerRequestFilter {
         String path = request.getServletPath();
 
         return !path.startsWith("/api/")
+                || ("POST".equals(request.getMethod()) && "/api/auth/google".equals(path))
                 || SKIPPED_PATHS.contains(path);
     }
 

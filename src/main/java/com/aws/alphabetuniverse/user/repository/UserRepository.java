@@ -18,6 +18,7 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
     // vì nếu như tìm ko thấy thì sẽ null sẽ gây ra lỗi NullPointExeption
     Optional<User> findByCognitoSub(String cognitoSub);
     Optional<User> findByEmail(String email);
+    Optional<User> findByEmailIgnoreCase(String email);
 
     // Login must serialize with Admin block/unblock before contacting Cognito.
     @Lock(LockModeType.PESSIMISTIC_WRITE)

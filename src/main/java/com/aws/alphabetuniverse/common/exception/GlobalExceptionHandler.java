@@ -7,6 +7,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.server.ResponseStatusException;
 
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -18,6 +20,34 @@ import java.util.Set;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(EmailAlreadyExistsException.class)
+    public ResponseEntity<Map<String, String>> handleEmailAlreadyExists(EmailAlreadyExistsException exception) {
+        return emailAlreadyExists();
+    }
+
+    @ExceptionHandler(CognitoOAuthException.class)
+    public ResponseEntity<Map<String, String>> handleCognitoOAuth(CognitoOAuthException exception) {
+        return ResponseEntity.status(exception.getStatusCode())
+                .headers(exception.getHeaders())
+                .body(Map.of("code", exception.getCode(), "message", exception.getReason()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException exception) {
+        var errors = exception.getBindingResult().getFieldErrors().stream()
+                .map(error -> Map.of("field", error.getField(),
+                        "message", error.getDefaultMessage() == null ? "Invalid value" : error.getDefaultMessage()))
+                .toList();
+        return ResponseEntity.badRequest().body(Map.of(
+                "code", "VALIDATION_ERROR", "message", "Request validation failed", "errors", errors));
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, String>> handleMalformedJson(HttpMessageNotReadableException exception) {
+        return ResponseEntity.badRequest().body(Map.of(
+                "code", "VALIDATION_ERROR", "message", "Request body must be valid JSON"));
+    }
 
     @ExceptionHandler(AccountBlockedException.class)
     public ResponseEntity<Map<String, String>> handleAccountBlocked(AccountBlockedException exception) {
@@ -166,13 +196,7 @@ public class GlobalExceptionHandler {
 
         // Chỉ lỗi UNIQUE email mới trả 409.
         if (isEmailUniqueViolation(exception)) {
-
-            return ResponseEntity
-                    .status(HttpStatus.CONFLICT)
-                    .body(Map.of(
-                            "message",
-                            "Email is already used by another account"
-                    ));
+            return emailAlreadyExists();
         }
 
         // Các lỗi database khác không được đánh đồng với lỗi email.
@@ -224,6 +248,13 @@ public class GlobalExceptionHandler {
     // ==========================================
     // COMMON RESPONSE
     // ==========================================
+
+    private ResponseEntity<Map<String, String>> emailAlreadyExists() {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                "code", EmailAlreadyExistsException.CODE,
+                "message", EmailAlreadyExistsException.MESSAGE
+        ));
+    }
 
     private ResponseEntity<Map<String, String>> badRequest(
             String message

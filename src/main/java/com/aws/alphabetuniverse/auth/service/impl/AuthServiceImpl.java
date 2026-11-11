@@ -4,7 +4,10 @@ import com.aws.alphabetuniverse.auth.dto.*;
 import com.aws.alphabetuniverse.auth.dto.ForgotPasswordRequest;
 import com.aws.alphabetuniverse.auth.dto.ForgotPasswordResponse;
 import com.aws.alphabetuniverse.auth.service.AuthService;
+import com.aws.alphabetuniverse.auth.config.CognitoOAuthSettings;
+import com.aws.alphabetuniverse.auth.service.CognitoOAuthService;
 import com.aws.alphabetuniverse.common.exception.AccountBlockedException;
+import com.aws.alphabetuniverse.common.exception.CognitoOAuthException;
 import com.aws.alphabetuniverse.user.dto.UserResponse;
 import com.aws.alphabetuniverse.user.entity.User;
 import com.aws.alphabetuniverse.user.repository.UserRepository;
@@ -28,8 +31,14 @@ import org.springframework.beans.factory.annotation.Value;
 
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UnsupportedOperationException;
 import java.time.LocalDateTime;
+import java.time.Instant;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class AuthServiceImpl implements AuthService {
@@ -44,6 +53,12 @@ public class AuthServiceImpl implements AuthService {
 
     @Autowired
     private JwtDecoder jwtDecoder;
+
+    @Autowired
+    private CognitoOAuthService cognitoOAuthService;
+
+    @Autowired
+    private CognitoOAuthSettings oauthSettings;
 
     @Value("${aws.cognito.client-id}")
     private String clientId;
@@ -84,13 +99,13 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LogoutResponse logout() {
-        String logoutUrl = cognitoDomain
+        String logoutUrl = cognitoDomain.strip().replaceAll("/+$", "")
                         + "/logout"
                         + "?client_id="
-                        + clientId
+                        + URLEncoder.encode(clientId, StandardCharsets.UTF_8)
                         + "&logout_uri="
-                        + frontendUrl
-                        + "/login";
+                        + URLEncoder.encode(frontendUrl.strip().replaceAll("/+$", "") + "/login",
+                                StandardCharsets.UTF_8);
         return LogoutResponse.builder()
                 .logoutUrl(logoutUrl)
                 .build();
@@ -319,6 +334,80 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
+    public LoginResponse loginWithGoogle(GoogleAuthRequest request) {
+        if (request == null) {
+            throw new CognitoOAuthException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR",
+                    "Google sign-in request is required");
+        }
+        request.validate();
+        oauthSettings.requireAllowedRedirectUri(request.redirectUri());
+        CognitoOAuthTokenResponse tokens = cognitoOAuthService.exchangeAuthorizationCode(request);
+        if (tokens == null) {
+            throw CognitoOAuthException.invalidResponse();
+        }
+        Jwt identity = verifyOAuthAccessToken(tokens.accessToken(), true);
+        var localUser = userRepository.findByCognitoSub(identity.getSubject());
+        if (localUser.isPresent()) {
+            assertOAuthAccountActive(localUser.get());
+        }
+        // Exchange does not read profile/email or create a local user.
+        // FE must complete POST /auth/sync before committing the application session.
+        return LoginResponse.builder()
+                .accessToken(tokens.accessToken()).idToken(tokens.idToken())
+                .refreshToken(tokens.refreshToken()).expiresIn(tokens.expiresIn()).build();
+    }
+
+    private Jwt verifyOAuthAccessToken(String token, boolean requireGoogleScopes) {
+        Jwt jwt;
+        try {
+            jwt = jwtDecoder.decode(token);
+        } catch (JwtException | IllegalArgumentException exception) {
+            throw CognitoOAuthException.invalidResponse();
+        }
+        if (jwt == null || jwt.getSubject() == null || jwt.getSubject().isBlank()
+                || !"access".equals(jwt.getClaims().get("token_use"))
+                || !clientId.equals(jwt.getClaims().get("client_id"))
+                || jwt.getExpiresAt() == null || !jwt.getExpiresAt().isAfter(Instant.now())) {
+            throw CognitoOAuthException.invalidResponse();
+        }
+        if (requireGoogleScopes) {
+            Object rawScope = jwt.getClaims().get("scope");
+            Set<String> scopes = rawScope instanceof String scope
+                    ? Arrays.stream(scope.split("\\s+")).collect(Collectors.toSet()) : Set.of();
+            if (!scopes.containsAll(Set.of("openid", "email", "profile", "aws.cognito.signin.user.admin"))) {
+                throw CognitoOAuthException.configurationError();
+            }
+        }
+        return jwt;
+    }
+
+    private void assertOAuthAccountActive(User user) {
+        if ("BLOCKED".equalsIgnoreCase(user.getStatus())) {
+            throw new AccountBlockedException();
+        }
+        if (!"ACTIVE".equalsIgnoreCase(user.getStatus())) {
+            throw new CognitoOAuthException(HttpStatus.FORBIDDEN, "ACCOUNT_INACTIVE",
+                    "Account is not active");
+        }
+    }
+
+    private RefreshTokenResponse refreshWithOAuth(String refreshToken) {
+        CognitoOAuthTokenResponse tokens = cognitoOAuthService.refreshTokens(refreshToken);
+        if (tokens == null) {
+            throw CognitoOAuthException.invalidResponse();
+        }
+        Jwt jwt = verifyOAuthAccessToken(tokens.accessToken(), false);
+        User user = userRepository.findByCognitoSub(jwt.getSubject())
+                .orElseThrow(() -> new CognitoOAuthException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
+                        "User has not been synchronized"));
+        assertOAuthAccountActive(user);
+        String nextRefreshToken = tokens.refreshToken() == null || tokens.refreshToken().isBlank()
+                ? refreshToken : tokens.refreshToken();
+        return new RefreshTokenResponse(tokens.accessToken(), tokens.idToken(),
+                nextRefreshToken, tokens.expiresIn());
+    }
+
+    @Override
     public RefreshTokenResponse refreshToken(
             RefreshTokenRequest request
     ) {
@@ -335,6 +424,10 @@ public class AuthServiceImpl implements AuthService {
         }
 
         String refreshToken = request.refreshToken().trim();
+
+        if (oauthSettings.useOAuthRefresh()) {
+            return refreshWithOAuth(refreshToken);
+        }
 
         try {
 

@@ -1,5 +1,6 @@
 package com.aws.alphabetuniverse.user.service.impl;
 
+import com.aws.alphabetuniverse.common.exception.CognitoOAuthException;
 import com.aws.alphabetuniverse.user.dto.CognitoUserProfile;
 import com.aws.alphabetuniverse.user.service.CognitoUserAttributeService;
 import lombok.RequiredArgsConstructor;
@@ -79,34 +80,40 @@ public class CognitoUserAttributeServiceImpl implements CognitoUserAttributeServ
 
     private void validateAccessToken(String accessToken) {
         if (accessToken == null || accessToken.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Access token is required");
+            throw new CognitoOAuthException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Access token is required");
         }
     }
 
     private ResponseStatusException translateCognitoException(CognitoIdentityProviderException ex) {
         HttpStatus status;
+        String code;
         String message;
         if (ex instanceof NotAuthorizedException || ex instanceof UserNotFoundException) {
             status = HttpStatus.UNAUTHORIZED;
+            code = "UNAUTHORIZED";
             message = "Cognito access token is invalid, expired or revoked";
         } else if (ex instanceof TooManyRequestsException) {
             status = HttpStatus.TOO_MANY_REQUESTS;
+            code = "TOO_MANY_REQUESTS";
             message = "Cognito request limit exceeded";
         } else if (ex instanceof ForbiddenException) {
             status = HttpStatus.FORBIDDEN;
+            code = "COGNITO_OAUTH_FORBIDDEN";
             message = "Cognito request was blocked by security policy";
         } else if (ex instanceof InvalidParameterException || ex instanceof UserLambdaValidationException) {
             status = HttpStatus.BAD_REQUEST;
+            code = "VALIDATION_ERROR";
             message = "Cognito rejected the user attributes";
         } else {
             status = ex.statusCode() >= 500 ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.BAD_GATEWAY;
+            code = ex.statusCode() >= 500 ? "COGNITO_UNAVAILABLE" : "COGNITO_OAUTH_CONFIG_ERROR";
             message = "Cognito service is temporarily unavailable";
         }
-        return new ResponseStatusException(status, message, ex);
+        return new CognitoOAuthException(status, code, message);
     }
 
     private ResponseStatusException unavailable(String message, SdkClientException ex) {
         log.warn("Cognito request could not be confirmed; exception={}", ex.getClass().getSimpleName());
-        return new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, message, ex);
+        return new CognitoOAuthException(HttpStatus.SERVICE_UNAVAILABLE, "COGNITO_UNAVAILABLE", message);
     }
 }

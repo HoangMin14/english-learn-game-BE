@@ -49,6 +49,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/sync")
                         .authenticated()
 
+                        .requestMatchers(HttpMethod.POST, "/api/auth/google")
+                        .permitAll()
+
                         .requestMatchers(
                                 HttpMethod.POST,
                                 "/api/auth/refresh"
