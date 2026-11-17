@@ -86,9 +86,6 @@ public class AuthController {
     }
 
     @PostMapping("/google")
-    @Operation(summary = "Đăng nhập Google bằng authorization code và PKCE",
-            description = "Không gửi Bearer token. API chỉ đổi code và kiểm tra token/trạng thái local; "
-                    + "chưa tạo user hoặc kiểm tra email. Sau đó gọi POST /api/auth/sync bằng accessToken mới.")
     public ResponseEntity<LoginResponse> loginWithGoogle(@Valid @RequestBody GoogleAuthRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.PRAGMA, "no-cache")
